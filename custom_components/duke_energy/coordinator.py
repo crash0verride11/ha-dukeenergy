@@ -127,7 +127,9 @@ class DukeEnergyCoordinator(DataUpdateCoordinator[None]):
                     min(usage.keys()),
                     None,
                     {consumption_statistic_id},
-                    "hour",
+                    "hour"
+                    if meter["serviceType"] == "ELECTRIC"
+                    else "day",
                     None,
                     {"sum"},
                 )
@@ -159,8 +161,10 @@ class DukeEnergyCoordinator(DataUpdateCoordinator[None]):
                 name=f"{name_prefix} Consumption",
                 source=DOMAIN,
                 statistic_id=consumption_statistic_id,
-                unit_class=EnergyConverter.UNIT_CLASS,
-                unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR
+                unit_class=EnergyConverter.UNIT_CLASS
+                if meter["serviceType"] == "ELECTRIC"
+                else 'volume',
+                unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR 
                 if meter["serviceType"] == "ELECTRIC"
                 else UnitOfVolume.CENTUM_CUBIC_FEET,
             )
@@ -209,12 +213,18 @@ class DukeEnergyCoordinator(DataUpdateCoordinator[None]):
         end_step = end
         usage: dict[datetime, dict[str, float | int]] = {}
         while True:
-            _LOGGER.debug("Getting hourly usage: %s - %s", start_step, end_step)
+            if meter["serviceType"] == "GAS":
+                runInterval = "DAILY"
+                runPeriod = "WEEK"
+            else:
+                runInterval = "HOURLY"
+                runPeriod = "DAY"
+            _LOGGER.debug("Getting %s %s usage: %s - %s", meter["serviceType"].lower().capitalize(),runInterval.lower(),start_step, end_step)
             try:
                 # Get data
                 try:
                     results = await self.api.get_energy_usage(
-                        meter["serialNum"], "HOURLY", "DAY", start_step, end_step
+                        meter["serialNum"], runInterval, runPeriod, start_step, end_step
                     )
                 except DukeEnergyAuthError as err:
                     raise ConfigEntryAuthFailed from err
