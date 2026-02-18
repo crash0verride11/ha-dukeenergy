@@ -17,6 +17,7 @@ if TYPE_CHECKING:
 
 from .const import (
     AUTH0_CLIENT,
+    DOMAIN,
     MOBILE_REDIRECT_URI,
     OAUTH2_AUTHORIZE,
     OAUTH2_CLIENT_ID,
@@ -34,7 +35,7 @@ class DukeEnergyOAuth2Implementation(LocalOAuth2ImplementationWithPkce):
         """Initialize the Duke Energy OAuth2 implementation."""
         super().__init__(
             hass,
-            domain="duke_energy",
+            domain=DOMAIN,
             client_id=OAUTH2_CLIENT_ID,
             client_secret="",  # PKCE flow doesn't need a client secret
             authorize_url=OAUTH2_AUTHORIZE,

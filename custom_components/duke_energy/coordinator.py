@@ -4,7 +4,7 @@ import logging
 from datetime import datetime, timedelta
 from typing import Any, cast
 
-from aiodukeenergy import DukeEnergy, DukeEnergyAuthError
+from .aiodukeenergy import DukeEnergy, DukeEnergyAuthError
 from aiohttp import ClientError
 from homeassistant.components.recorder import (
     get_instance,  # pyright: ignore[reportPrivateImportUsage]
@@ -31,7 +31,7 @@ from .const import DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
 
-_SUPPORTED_METER_TYPES = ("ELECTRIC",)
+_SUPPORTED_METER_TYPES = ("ELECTRIC","GAS")
 
 type DukeEnergyConfigEntry = ConfigEntry[DukeEnergyCoordinator]
 
@@ -213,6 +213,7 @@ class DukeEnergyCoordinator(DataUpdateCoordinator[None]):
         end_step = end
         usage: dict[datetime, dict[str, float | int]] = {}
         while True:
+            #CHANGE AREA
             if meter["serviceType"] == "GAS":
                 runInterval = "DAILY"
                 runPeriod = "WEEK"

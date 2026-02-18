@@ -16,3 +16,6 @@ coverage.xml
 # Home Assistant configuration
 config/*
 !config/configuration.yaml
+custom_components/duke_energy/.DS_Store
+custom_components/.DS_Store
+.DS_Store
