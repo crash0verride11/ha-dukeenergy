@@ -12,7 +12,7 @@ In November 2025, Duke Energy migrated their API authentication to use Auth0 whi
 > All steps below must be performed in the Google Chrome browser on a desktop.
 > The chrome extension is required to successfully authenticate with Duke Energy. Do not skip this step!
 
-1. Download the latest chrome extension from the aiodukeenergy release page [here](https://github.com/crash0verride11/aiodukeenergy/releases/latest/download/chrome-extension.zip) or pull from source.
+1. Download the latest chrome extension from the aiodukeenergy release page [here](https://github.com/crash0verride11/ha-dukeenergy/releases/latest/download/chrome-extension.zip) or pull from source.
 2. Extract the folder from zip if downloaded.
 3. In Google Chrome, visit [chrome://extensions/](chrome://extensions/). In Edge, visit [edge://extensions/](edge://extensions/).
 4. Enable `Developer mode` in the top right.
@@ -27,7 +27,7 @@ In November 2025, Duke Energy migrated their API authentication to use Auth0 whi
 > [!IMPORTANT]
 >Added beta safari support using the built-in xcode conversion method. Requires a free developer account.
 
-1. Download the latest safari extension from the release page [here](https://github.com/crash0verride11/aiodukeenergy/releases/latest/download/safari-extension.zip) or pull from source.
+1. Download the latest safari extension from the release page [here](https://github.com/crash0verride11/ha-dukeenergy/releases/latest/download/safari-extension.zip) or pull from source.
 2. Open the project
 3. Set your free developer account as the Team in both Targets
 4. Build
@@ -35,4 +35,5 @@ In November 2025, Duke Energy migrated their API authentication to use Auth0 whi
 6. Build the extension again.
 7. Enable access to all or specific URL in the extension settings.
 8. Try to authenticate.
+
 
