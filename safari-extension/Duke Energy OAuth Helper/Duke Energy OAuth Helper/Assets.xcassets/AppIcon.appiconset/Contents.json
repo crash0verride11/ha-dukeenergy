@@ -31,11 +31,13 @@
       "size" : "128x128"
     },
     {
+      "filename" : "OAuth Icon.png",
       "idiom" : "mac",
       "scale" : "1x",
       "size" : "256x256"
     },
     {
+      "filename" : "OAuth Icon@2x.png",
       "idiom" : "mac",
       "scale" : "2x",
       "size" : "256x256"

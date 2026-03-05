@@ -1,10 +1,12 @@
 {
   "images" : [
     {
+      "filename" : "OAuth Icon.png",
       "idiom" : "universal",
       "scale" : "1x"
     },
     {
+      "filename" : "OAuth Icon@2x.png",
       "idiom" : "universal",
       "scale" : "2x"
     },
