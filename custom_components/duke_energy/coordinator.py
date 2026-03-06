@@ -215,11 +215,11 @@ class DukeEnergyCoordinator(DataUpdateCoordinator[None]):
         _LOGGER.debug("Data lookup range: %s - %s", start, end)
 
         if meter["serviceType"] == "GAS":
-            runInterval = "DAILY"
-            runPeriod = "WEEK"
+            run_interval = "DAILY"
+            run_period = "WEEK"
         else:
-            runInterval = "HOURLY"
-            runPeriod = "DAY"
+            run_interval = "HOURLY"
+            run_period = "DAY"
 
         start_step = max(end - lookback, start)
         end_step = end
@@ -228,7 +228,7 @@ class DukeEnergyCoordinator(DataUpdateCoordinator[None]):
             _LOGGER.debug(
                 "Getting %s %s usage: %s - %s",
                 meter["serviceType"].lower().capitalize(),
-                runInterval.lower(),
+                run_interval.lower(),
                 start_step,
                 end_step,
             )
@@ -236,7 +236,11 @@ class DukeEnergyCoordinator(DataUpdateCoordinator[None]):
                 # Get data
                 try:
                     results = await self.api.get_energy_usage(
-                        meter["serialNum"], runInterval, runPeriod, start_step, end_step
+                        meter["serialNum"],
+                        run_interval,
+                        run_period,
+                        start_step,
+                        end_step,
                     )
                 except DukeEnergyAuthError as err:
                     raise ConfigEntryAuthFailed from err
@@ -258,4 +262,4 @@ class DukeEnergyCoordinator(DataUpdateCoordinator[None]):
                 break
 
         _LOGGER.debug("Got %s meter usage reads", len(usage))
-        return usage, runInterval
+        return usage, run_interval
