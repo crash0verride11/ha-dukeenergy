@@ -144,7 +144,7 @@ class DukeEnergyCoordinator(DataUpdateCoordinator[None]):
                     continue
                 consumption_sum += data["energy"]
 
-                # For daily intervals, register usage at 11pm to better represent
+                # For daily intervals, register usage at noon to better represent
                 # when daily usage occurred rather than at midnight (start of day).
                 stat_start = (
                     start + timedelta(hours=12) if interval == "DAILY" else start
