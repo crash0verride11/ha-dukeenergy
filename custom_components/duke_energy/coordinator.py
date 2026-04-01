@@ -1,7 +1,7 @@
 """Coordinator to handle Duke Energy connections."""
 
 import logging
-from datetime import datetime, timedelta
+from datetime import date, datetime, time, timedelta
 from typing import Any, cast
 
 from .aiodukeenergy import DukeEnergy, DukeEnergyAuthError
@@ -20,7 +20,7 @@ from homeassistant.components.recorder.statistics import (
     statistics_during_period,
 )
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import UnitOfEnergy, UnitOfVolume
+from homeassistant.const import UnitOfEnergy, UnitOfTemperature, UnitOfVolume
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
@@ -77,6 +77,8 @@ class DukeEnergyCoordinator(DataUpdateCoordinator[None]):
 
     async def _async_update_data(self) -> None:
         """Insert Duke Energy statistics."""
+        tz = await dt_util.async_get_time_zone("America/New_York")
+        temp_accounts_seen: set[str] = set()
         try:
             meters: dict[str, dict[str, Any]] = await self.api.get_meters()
         except DukeEnergyAuthError as err:
@@ -176,6 +178,64 @@ class DukeEnergyCoordinator(DataUpdateCoordinator[None]):
             )
             async_add_external_statistics(
                 self.hass, consumption_metadata, consumption_statistics
+            )
+
+            # Temperature statistic (first meter per account only)
+            account_number = meter["account"]["accountNumber"]
+            if account_number in temp_accounts_seen:
+                continue
+            temp_accounts_seen.add(account_number)
+
+            src_acct_id = meter["account"]["srcAcctId"]
+            temperature_statistic_id = f"{DOMAIN}:account_{src_acct_id}_temperature"
+            self._statistic_ids.add(temperature_statistic_id)
+
+            last_temp_stat = await get_instance(self.hass).async_add_executor_job(
+                get_last_statistics,
+                self.hass,
+                1,
+                temperature_statistic_id,
+                True,  # noqa: FBT003
+                set(),
+            )
+            last_temp_time = (
+                last_temp_stat[temperature_statistic_id][0]["start"]  # pyright: ignore[reportTypedDictNotRequiredAccess]
+                if last_temp_stat
+                else None
+            )
+
+            daily_temps: dict[date, list] = {}
+            for start, data in usage.items():
+                if data["temperature"] is None:
+                    continue
+                daily_temps.setdefault(start.date(), []).append(data["temperature"])
+
+            temperature_statistics = []
+            for day, temps in sorted(daily_temps.items()):
+                stat_start = datetime.combine(day, time(12, 0), tzinfo=tz)
+                if last_temp_time is not None and stat_start.timestamp() <= last_temp_time:
+                    continue
+                temperature_statistics.append(
+                    StatisticData(start=stat_start, mean=temps[0])
+                )
+
+            temperature_metadata = StatisticMetaData(
+                mean_type=StatisticMeanType.ARITHMETIC,
+                has_sum=False,
+                name=f"Duke Energy Account {src_acct_id} Temperature",
+                source=DOMAIN,
+                statistic_id=temperature_statistic_id,
+                unit_class="temperature",
+                unit_of_measurement=UnitOfTemperature.FAHRENHEIT,
+            )
+
+            _LOGGER.debug(
+                "Adding %s statistics for %s",
+                len(temperature_statistics),
+                temperature_statistic_id,
+            )
+            async_add_external_statistics(
+                self.hass, temperature_metadata, temperature_statistics
             )
 
     async def _async_get_energy_usage(
