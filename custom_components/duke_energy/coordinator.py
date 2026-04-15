@@ -6,7 +6,7 @@ from collections.abc import Callable
 from datetime import date, datetime, time, timedelta
 from typing import Any, cast
 
-from .aiodukeenergy import DukeEnergy, DukeEnergyAuthError
+from aiodukeenergy import DukeEnergy, DukeEnergyAuthError
 from aiohttp import ClientError
 from homeassistant.components.recorder import (
     get_instance,  # pyright: ignore[reportPrivateImportUsage]
