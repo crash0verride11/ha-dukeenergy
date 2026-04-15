@@ -321,9 +321,9 @@ class DukeEnergyCoordinator(DataUpdateCoordinator[None]):
         finally:
             had_success = self._last_successful_date == today
             if had_success:
-                _LOGGER.warning("Duke Energy data retrieval successful")
+                _LOGGER.debug("Duke Energy data retrieval successful")
             else:
-                _LOGGER.warning("No new Duke Energy usage data available; will retry at next scheduled time")
+                _LOGGER.debug("No new Duke Energy usage data available; will retry at next scheduled time")
             self._schedule_next_check(tz, had_success=had_success)
 
     async def _async_get_energy_usage(
