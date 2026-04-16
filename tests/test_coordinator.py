@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, Mock, patch
 from freezegun.api import FrozenDateTimeFactory
 
 from homeassistant.components.recorder.models import StatisticMeanType
-from homeassistant.const import UnitOfEnergy
+from homeassistant.const import UnitOfEnergy, UnitOfVolume
 from homeassistant.core import HomeAssistant
 from homeassistant.util import dt as dt_util
 from homeassistant.util.unit_conversion import EnergyConverter
@@ -106,3 +106,43 @@ async def test_update(
         # Coordinator must not be in error state — confirms the second refresh
         # completed rather than silently dying on KeyError: 'sum'.
         assert coordinator.last_update_success is True
+
+
+async def test_gas_meter_update(
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+    mock_api_with_gas_meter: AsyncMock,
+    mock_recorder: Mock,
+) -> None:
+    """Coordinator handles gas meters: DAILY/WEEK API params, noon offset, CCF unit."""
+    mock_config_entry.add_to_hass(hass)
+    coordinator = DukeEnergyCoordinator(hass, mock_api_with_gas_meter, mock_config_entry)
+
+    with patch(
+        "custom_components.duke_energy.coordinator.get_last_statistics",
+        return_value={},
+    ):
+        await coordinator.async_refresh()
+        await hass.async_block_till_done()
+
+    # get_energy_usage is called with DAILY/WEEK for gas
+    sample_call = mock_api_with_gas_meter.get_energy_usage.call_args
+    assert sample_call.args[1] == "DAILY"
+    assert sample_call.args[2] == "WEEK"
+
+    # Metadata: volume units, gas statistic_id and name
+    assert mock_recorder.mock_add_stats.call_count == 1
+    _, metadata, statistics = mock_recorder.mock_add_stats.call_args.args
+    assert metadata["statistic_id"] == "duke_energy:gas_456_energy_consumption"
+    assert metadata["name"] == "Duke Energy Gas 456 Consumption"
+    assert metadata["unit_class"] == "volume"
+    assert metadata["unit_of_measurement"] == UnitOfVolume.CENTUM_CUBIC_FEET
+    assert metadata["has_sum"] is True
+    assert metadata["mean_type"] == StatisticMeanType.NONE
+
+    # Daily readings are registered at noon (start + 12h), not at midnight
+    assert len(statistics) == 1
+    expected_start = next(iter(mock_api_with_gas_meter.get_energy_usage.return_value["data"]))
+    assert statistics[0]["start"] == expected_start + timedelta(hours=12)
+    assert statistics[0]["state"] == pytest.approx(2.5)
+    assert statistics[0]["sum"] == pytest.approx(2.5)

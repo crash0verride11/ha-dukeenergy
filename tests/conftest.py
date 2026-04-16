@@ -167,3 +167,20 @@ def mock_api_with_meters(mock_api: AsyncMock) -> AsyncMock:
         "missing": [],
     }
     return mock_api
+
+
+@pytest.fixture
+def mock_api_with_gas_meter(mock_api: AsyncMock) -> AsyncMock:
+    """Extend mock_api with a single gas meter and one reading."""
+    mock_api.get_meters.return_value = {
+        "456": {
+            "serialNum": "456",
+            "serviceType": "GAS",
+            "agreementActiveDate": "2000-01-01",
+        },
+    }
+    mock_api.get_energy_usage.return_value = {
+        "data": {dt_util.now(): {"energy": 2.5, "temperature": 68}},
+        "missing": [],
+    }
+    return mock_api
