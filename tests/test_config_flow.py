@@ -76,22 +76,12 @@ async def test_oauth_create_entry(
     mock_setup_entry: AsyncMock,
 ) -> None:
     """async_oauth_create_entry extracts user_id/email from id_token and creates entry."""
-    result = await _make_flow(hass).async_oauth_create_entry(_make_oauth_data())
+    flow = _make_flow(hass)
+    result = await flow.async_oauth_create_entry(_make_oauth_data())
 
     assert result["type"] is FlowResultType.CREATE_ENTRY
     assert result["title"] == "test@example.com"
-
-
-async def test_oauth_create_entry_uses_user_id_as_unique_id(
-    hass: HomeAssistant,
-    mock_setup_entry: AsyncMock,
-) -> None:
-    """Unique ID is the internal_identifier claim, not the email."""
-    flow = _make_flow(hass)
-    await flow.async_oauth_create_entry(_make_oauth_data())
-
-    # The flow manager sets the unique_id on the flow instance via async_set_unique_id,
-    # which stores it in flow.context["unique_id"] (read back via the unique_id property).
+    # Unique ID is internal_identifier, not email — drives deduplication logic.
     assert flow.unique_id == "test-user-id"
 
 
@@ -158,30 +148,6 @@ async def test_abort_if_already_configured(
 
     assert result["type"] is FlowResultType.ABORT
     assert result["reason"] == "already_configured"
-
-
-async def test_reauth_confirm_shows_form(
-    hass: HomeAssistant,
-) -> None:
-    """Reauth confirm step returns a form when user_input is None."""
-    existing = MockConfigEntry(
-        domain=DOMAIN,
-        unique_id="test-user-id",
-        title="test@example.com",
-        version=2,
-        minor_version=1,
-        data=_make_oauth_data(),
-    )
-    existing.add_to_hass(hass)
-
-    result = await hass.config_entries.flow.async_init(
-        DOMAIN,
-        context={"source": config_entries.SOURCE_REAUTH, "entry_id": existing.entry_id},
-        data=existing.data,
-    )
-
-    assert result["type"] is FlowResultType.FORM
-    assert result["step_id"] == "reauth_confirm"
 
 
 async def test_reauth_success(

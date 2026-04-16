@@ -10,11 +10,12 @@ from homeassistant.config_entries import ConfigEntryState
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed
 
+from homeassistant.helpers.config_entry_oauth2_flow import OAuth2Session
+
 from custom_components.duke_energy import async_setup_entry
 from custom_components.duke_energy.const import DOMAIN
 from custom_components.duke_energy.coordinator import DukeEnergyCoordinator
 from pytest_homeassistant_custom_component.common import MockConfigEntry
-
 
 
 async def test_setup_entry(
@@ -48,7 +49,6 @@ async def test_setup_entry(
 
     # DukeEnergyAuth receives the aiohttp ClientSession and an OAuth2Session
     mock_auth_cls.assert_called_once()
-    from homeassistant.helpers.config_entry_oauth2_flow import OAuth2Session
     _, oauth_session_arg = mock_auth_cls.call_args.args
     assert isinstance(oauth_session_arg, OAuth2Session)
 
