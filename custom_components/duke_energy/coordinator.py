@@ -141,6 +141,9 @@ class DukeEnergyCoordinator(DataUpdateCoordinator[None]):
         supported_meter_count = 0
         yesterday_data_count = 0
         temp_accounts_seen: set[str] = set()
+        cost_entities: dict[str, str] = self.config_entry.options.get(
+            "cost_entities", {}
+        )
 
         try:
             if self._last_successful_date == today:
@@ -255,6 +258,17 @@ class DukeEnergyCoordinator(DataUpdateCoordinator[None]):
                     self.hass, consumption_metadata, consumption_statistics
                 )
 
+                # Cost statistic (only for meters with a configured price sensor)
+                cost_entity_id = cost_entities.get(serial_number)
+                if cost_entity_id:
+                    await self._async_add_cost_statistics(
+                        entity_id=cost_entity_id,
+                        id_prefix=id_prefix,
+                        name_prefix=name_prefix,
+                        usage=usage,
+                        interval=interval,
+                    )
+
                 # Temperature statistic (first meter per account only)
                 account_number = meter["account"]["accountNumber"]
                 if account_number in temp_accounts_seen:
@@ -325,6 +339,154 @@ class DukeEnergyCoordinator(DataUpdateCoordinator[None]):
             else:
                 _LOGGER.debug("No new Duke Energy usage data available; will retry at next scheduled time")
             self._schedule_next_check(tz, had_success=had_success)
+
+    async def _async_add_cost_statistics(
+        self,
+        *,
+        entity_id: str,
+        id_prefix: str,
+        name_prefix: str,
+        usage: dict[datetime, dict[str, float | int]],
+        interval: str,
+    ) -> None:
+        """
+        Derive and insert a cost statistic for a meter from a price sensor.
+
+        Cost is ``consumption * price`` per interval, where price is read from
+        the sensor's long-term statistics. The cost statistic is tracked
+        independently of consumption (its own sum baseline) so it can start
+        later than consumption and tolerate gaps: intervals with no price are
+        simply omitted rather than recorded as zero cost.
+        """
+        if not usage:
+            return
+
+        cost_statistic_id = f"{DOMAIN}:{id_prefix}_energy_cost"
+        self._statistic_ids.add(cost_statistic_id)
+
+        price_map = await self._async_get_price_map(
+            entity_id, min(usage), max(usage), interval
+        )
+        if not price_map:
+            _LOGGER.debug(
+                "No price statistics for %s; skipping cost for %s",
+                entity_id,
+                cost_statistic_id,
+            )
+            return
+
+        last_cost_stat = await get_instance(self.hass).async_add_executor_job(
+            get_last_statistics,
+            self.hass,
+            1,
+            cost_statistic_id,
+            True,  # noqa: FBT003
+            {"sum"},
+        )
+        if not last_cost_stat:
+            cost_sum = 0.0
+            last_cost_time: float | None = None
+        else:
+            stats = await get_instance(self.hass).async_add_executor_job(
+                statistics_during_period,
+                self.hass,
+                min(usage.keys()),
+                None,
+                {cost_statistic_id},
+                "hour" if interval == "HOURLY" else "day",
+                None,
+                {"sum"},
+            )
+            rows = stats.get(cost_statistic_id, [])
+            if rows:
+                cost_sum = cast("float", rows[0]["sum"])
+                last_cost_time = rows[0]["start"]
+            else:
+                # Existing cost stats predate the fetch window (e.g. the price
+                # sensor was unset for a while). Resume from the last known sum.
+                cost_sum = cast("float", last_cost_stat[cost_statistic_id][0]["sum"])  # pyright: ignore[reportTypedDictNotRequiredAccess]
+                last_cost_time = last_cost_stat[cost_statistic_id][0]["start"]  # pyright: ignore[reportTypedDictNotRequiredAccess]
+
+        cost_statistics = []
+        for start in sorted(usage):
+            if last_cost_time is not None and start.timestamp() <= last_cost_time:
+                continue
+            price = (
+                price_map.get(start.timestamp())
+                if interval == "HOURLY"
+                else price_map.get(start.date())
+            )
+            if price is None:
+                continue
+            cost = usage[start]["energy"] * price
+            cost_sum += cost
+            stat_start = start + timedelta(hours=12) if interval == "DAILY" else start
+            cost_statistics.append(
+                StatisticData(start=stat_start, state=cost, sum=cost_sum)
+            )
+
+        cost_metadata = StatisticMetaData(
+            mean_type=StatisticMeanType.NONE,
+            has_sum=True,
+            name=f"{name_prefix} Cost",
+            source=DOMAIN,
+            statistic_id=cost_statistic_id,
+            unit_class=None,
+            unit_of_measurement=self.hass.config.currency or "USD",
+        )
+
+        _LOGGER.debug(
+            "Adding %s statistics for %s",
+            len(cost_statistics),
+            cost_statistic_id,
+        )
+        async_add_external_statistics(self.hass, cost_metadata, cost_statistics)
+
+    async def _async_get_price_map(
+        self,
+        entity_id: str,
+        start: datetime,
+        end: datetime,
+        interval: str,
+    ) -> dict[float, float] | dict[date, float]:
+        """
+        Return per-interval price from a sensor's long-term statistics.
+
+        Always queries hourly means (aligned to the hour in UTC, so they match
+        the hourly usage keys exactly). For HOURLY meters the result is keyed by
+        the hour's epoch timestamp; for DAILY meters the hourly means are
+        averaged into each Eastern calendar day (keyed by ``date``), which keeps
+        the day boundary correct regardless of the recorder's own timezone.
+        """
+        # Extend the window by a full day so the final interval's hourly buckets
+        # are all included (end is exclusive, and DAILY needs the whole day).
+        raw = await get_instance(self.hass).async_add_executor_job(
+            statistics_during_period,
+            self.hass,
+            start,
+            end + timedelta(days=1),
+            {entity_id},
+            "hour",
+            None,
+            {"mean"},
+        )
+        rows = raw.get(entity_id, [])
+
+        if interval == "HOURLY":
+            return {
+                row["start"]: row["mean"]
+                for row in rows
+                if row.get("mean") is not None
+            }
+
+        tz = await dt_util.async_get_time_zone(_DUKE_TZ)
+        daily: dict[date, list[float]] = {}
+        for row in rows:
+            if row.get("mean") is None:
+                continue
+            day = datetime.fromtimestamp(row["start"], tz=tz).date()
+            daily.setdefault(day, []).append(row["mean"])
+        return {day: sum(means) / len(means) for day, means in daily.items()}
 
     async def _async_get_energy_usage(
         self, meter: dict[str, Any], start_time: float | None = None

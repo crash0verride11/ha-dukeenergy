@@ -19,3 +19,5 @@ config/*
 custom_components/duke_energy/.DS_Store
 custom_components/.DS_Store
 .DS_Store
+/docs
+CLAUDE.md
