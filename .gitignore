@@ -11,13 +11,12 @@ __pycache__
 .vscode
 coverage.xml
 .ruff_cache
+*.DS_Store
+/docs
+CLAUDE.md
 
 
 # Home Assistant configuration
 config/*
 !config/configuration.yaml
-custom_components/duke_energy/.DS_Store
-custom_components/.DS_Store
-.DS_Store
-/docs
-CLAUDE.md
+
