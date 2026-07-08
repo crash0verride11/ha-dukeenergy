@@ -14,7 +14,11 @@ from homeassistant.components.recorder.statistics import list_statistic_ids
 from homeassistant.config_entries import SOURCE_REAUTH, ConfigFlowResult, OptionsFlow
 from homeassistant.core import callback
 from homeassistant.helpers import config_entry_oauth2_flow
-from homeassistant.helpers.selector import EntitySelector, EntitySelectorConfig
+from homeassistant.helpers.selector import (
+    BooleanSelector,
+    EntitySelector,
+    EntitySelectorConfig,
+)
 
 from .const import DOMAIN
 from .coordinator import _SUPPORTED_METER_TYPES, DukeEnergyConfigEntry
@@ -135,37 +139,44 @@ class DukeEnergyOptionsFlow(OptionsFlow):
                 for serial in supported
                 if user_input.get(serial)
             }
-            missing = [
+            unusable = [
                 entity_id
                 for entity_id in selected.values()
-                if not await self._entity_has_statistics(entity_id)
+                if not await self._entity_usable_for_price(entity_id)
             ]
-            if missing:
-                errors["base"] = "no_statistics"
+            if unusable:
+                errors["base"] = "no_price_data"
             else:
-                # Reload so the coordinator picks up the new mapping immediately
-                # rather than at the next scheduled poll. Only when it changed —
-                # a reload triggers a full data refresh.
-                if selected != self.config_entry.options.get("cost_entities", {}):
+                backfill = user_input.get("backfill_cost", False)
+                # Only reload when backfill is requested; otherwise the
+                # coordinator picks up the new mapping at its next scheduled
+                # poll. A reload (not async_request_refresh) is required because
+                # a fresh coordinator resets _last_successful_date, bypassing the
+                # "already retrieved today" guard that would defer the backfill.
+                if backfill:
                     self.hass.config_entries.async_schedule_reload(
                         self.config_entry.entry_id
                     )
-                return self.async_create_entry(data={"cost_entities": selected})
+                return self.async_create_entry(
+                    data={"cost_entities": selected, "backfill_cost": backfill}
+                )
 
         prefill = (
             user_input
             if user_input is not None
             else self.config_entry.options.get("cost_entities", {})
         )
-        schema = vol.Schema(
-            {
-                vol.Optional(
-                    serial,
-                    description={"suggested_value": prefill.get(serial)},
-                ): EntitySelector(EntitySelectorConfig(domain="sensor"))
-                for serial in supported
-            }
-        )
+        schema_dict: dict[Any, Any] = {
+            vol.Optional(
+                serial,
+                description={"suggested_value": prefill.get(serial)},
+            ): EntitySelector(EntitySelectorConfig(domain="sensor"))
+            for serial in supported
+        }
+        # Backfill always defaults to off: it is a one-shot action the coordinator
+        # resets after populating history, so it should never persist as enabled.
+        schema_dict[vol.Optional("backfill_cost", default=False)] = BooleanSelector()
+        schema = vol.Schema(schema_dict)
         meter_lines = "\n".join(
             f"- {meter['serviceType'].capitalize()} meter {serial} "
             f"— expects {_EXPECTED_UNIT.get(meter['serviceType'], '')}"
@@ -178,9 +189,24 @@ class DukeEnergyOptionsFlow(OptionsFlow):
             description_placeholders={"meters": meter_lines},
         )
 
-    async def _entity_has_statistics(self, entity_id: str) -> bool:
-        """Return whether the entity has long-term statistics recorded."""
+    async def _entity_usable_for_price(self, entity_id: str) -> bool:
+        """
+        Return whether the entity can price usage.
+
+        Preferred: long-term statistics (per-interval historical price). Failing
+        that, a numeric current state is enough — the coordinator falls back to
+        it as a flat rate for ongoing usage.
+        """
         result = await get_instance(self.hass).async_add_executor_job(
             list_statistic_ids, self.hass, {entity_id}
         )
-        return bool(result)
+        if result:
+            return True
+        state = self.hass.states.get(entity_id)
+        if state is None:
+            return False
+        try:
+            float(state.state)
+        except (ValueError, TypeError):
+            return False
+        return True

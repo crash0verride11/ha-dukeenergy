@@ -6,6 +6,10 @@ import logging
 from typing import TYPE_CHECKING
 
 from .aiodukeenergy import DukeEnergy
+from homeassistant.components.recorder import (
+    get_instance,  # pyright: ignore[reportPrivateImportUsage]
+)
+from homeassistant.components.recorder.statistics import list_statistic_ids
 from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers import aiohttp_client, config_entry_oauth2_flow
 
@@ -72,3 +76,23 @@ async def async_unload_entry(
 ) -> bool:
     """Unload a config entry."""
     return True
+
+
+async def async_remove_entry(
+    hass: HomeAssistant, _entry: DukeEnergyConfigEntry
+) -> None:
+    """
+    Clear this integration's external statistics when it is removed.
+
+    Statistics persist across reloads and restarts (see the coordinator's
+    _on_unload); they are only removed here, when the user deletes the entry.
+    """
+    instance = get_instance(hass)
+    all_stats = await instance.async_add_executor_job(list_statistic_ids, hass)
+    stat_ids = [
+        stat["statistic_id"]
+        for stat in all_stats
+        if stat.get("source") == DOMAIN
+    ]
+    if stat_ids:
+        instance.async_clear_statistics(stat_ids)

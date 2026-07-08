@@ -2,7 +2,9 @@
 
 import hashlib
 import logging
-from collections.abc import Callable
+from bisect import bisect_right
+from collections.abc import Callable, Iterable
+from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from typing import Any, cast
 
@@ -22,7 +24,13 @@ from homeassistant.components.recorder.statistics import (
     statistics_during_period,
 )
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import UnitOfEnergy, UnitOfTemperature, UnitOfVolume
+from homeassistant.const import (
+    STATE_UNAVAILABLE,
+    STATE_UNKNOWN,
+    UnitOfEnergy,
+    UnitOfTemperature,
+    UnitOfVolume,
+)
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers.event import async_track_point_in_time
@@ -49,6 +57,46 @@ _BASE_TIMES_ET = (time(9, 0), time(14, 0), time(19, 0))
 _OFFSET_WINDOW = timedelta(hours=2)
 
 type DukeEnergyConfigEntry = ConfigEntry[DukeEnergyCoordinator]
+
+
+@dataclass(slots=True)
+class _PriceMap:
+    """
+    Per-interval price lookup from a price sensor's long-term statistics.
+
+    ``keys`` are epoch timestamps for HOURLY meters and Eastern calendar dates
+    for DAILY meters, kept sorted (ascending) alongside their ``prices`` so a
+    lookup is a single bisect. An empty map is falsy.
+    """
+
+    interval: str
+    keys: list[float | date]
+    prices: list[float]
+
+    def __bool__(self) -> bool:
+        return bool(self.keys)
+
+    @property
+    def earliest(self) -> float | None:
+        """The oldest known price, or None when the map is empty."""
+        return self.prices[0] if self.prices else None
+
+    def price_at(self, start: datetime) -> float | None:
+        """
+        Return the most recent price at or before ``start``, carried forward.
+
+        Utility rates change irregularly, so the last known price stays correct
+        across recording gaps (e.g. HA downtime while Duke kept metering).
+        Returns None when no price precedes the interval — pricing never reaches
+        backward in time (and so an empty map always returns None).
+        """
+        key: float | date = (
+            start.timestamp() if self.interval == "HOURLY" else start.date()
+        )
+        index = bisect_right(self.keys, key) - 1
+        if index < 0:
+            return None
+        return self.prices[index]
 
 
 class DukeEnergyCoordinator(DataUpdateCoordinator[None]):
@@ -80,11 +128,17 @@ class DukeEnergyCoordinator(DataUpdateCoordinator[None]):
         self.config_entry.async_on_unload(self._on_unload)
 
     def _on_unload(self) -> None:
-        """Cancel any pending scheduled update and clear statistics."""
+        """
+        Cancel any pending scheduled update.
+
+        Statistics are intentionally NOT cleared here. Unload runs on every
+        reload and restart, so wiping the external statistics would discard all
+        history. History is cleared only when the config entry is removed (see
+        async_remove_entry).
+        """
         if self._unsub_scheduled is not None:
             self._unsub_scheduled()
             self._unsub_scheduled = None
-        get_instance(self.hass).async_clear_statistics(list(self._statistic_ids))
 
     def _get_or_create_daily_offset(self, day: date) -> timedelta:
         """Return a stable deterministic offset for the given day, derived from
@@ -143,6 +197,9 @@ class DukeEnergyCoordinator(DataUpdateCoordinator[None]):
         temp_accounts_seen: set[str] = set()
         cost_entities: dict[str, str] = self.config_entry.options.get(
             "cost_entities", {}
+        )
+        do_backfill = bool(cost_entities) and self.config_entry.options.get(
+            "backfill_cost", False
         )
 
         try:
@@ -220,15 +277,11 @@ class DukeEnergyCoordinator(DataUpdateCoordinator[None]):
                     if last_stats_time is not None and start.timestamp() <= last_stats_time:
                         continue
                     consumption_sum += data["energy"]
-
-                    # For daily intervals, register usage at noon to better represent
-                    # when daily usage occurred rather than at midnight (start of day).
-                    stat_start = (
-                        start + timedelta(hours=12) if interval == "DAILY" else start
-                    )
                     consumption_statistics.append(
                         StatisticData(
-                            start=stat_start, state=data["energy"], sum=consumption_sum
+                            start=self._stat_start(start, interval),
+                            state=data["energy"],
+                            sum=consumption_sum,
                         )
                     )
 
@@ -260,7 +313,14 @@ class DukeEnergyCoordinator(DataUpdateCoordinator[None]):
 
                 # Cost statistic (only for meters with a configured price sensor)
                 cost_entity_id = cost_entities.get(serial_number)
-                if cost_entity_id:
+                if cost_entity_id and do_backfill:
+                    await self._async_backfill_cost(
+                        entity_id=cost_entity_id,
+                        id_prefix=id_prefix,
+                        name_prefix=name_prefix,
+                        interval=interval,
+                    )
+                elif cost_entity_id:
                     await self._async_add_cost_statistics(
                         entity_id=cost_entity_id,
                         id_prefix=id_prefix,
@@ -329,6 +389,15 @@ class DukeEnergyCoordinator(DataUpdateCoordinator[None]):
 
                 # --- End temperature statistic addition
 
+            if do_backfill:
+                # One-shot: clear the flag now that history has been repriced, so
+                # the full reprice does not repeat on every poll or on restart.
+                # No update listener is registered, so this does not reload.
+                self.hass.config_entries.async_update_entry(
+                    self.config_entry,
+                    options={**self.config_entry.options, "backfill_cost": False},
+                )
+
             if supported_meter_count > 0 and yesterday_data_count == supported_meter_count:
                 self._last_successful_date = today
 
@@ -339,6 +408,16 @@ class DukeEnergyCoordinator(DataUpdateCoordinator[None]):
             else:
                 _LOGGER.debug("No new Duke Energy usage data available; will retry at next scheduled time")
             self._schedule_next_check(tz, had_success=had_success)
+
+    @staticmethod
+    def _stat_start(start: datetime, interval: str) -> datetime:
+        """
+        Return the statistic timestamp for an interval's start.
+
+        Daily usage is registered at noon rather than midnight to better
+        represent when it occurred; hourly usage is recorded as-is.
+        """
+        return start + timedelta(hours=12) if interval == "DAILY" else start
 
     async def _async_add_cost_statistics(
         self,
@@ -353,28 +432,46 @@ class DukeEnergyCoordinator(DataUpdateCoordinator[None]):
         Derive and insert a cost statistic for a meter from a price sensor.
 
         Cost is ``consumption * price`` per interval, where price is read from
-        the sensor's long-term statistics. The cost statistic is tracked
-        independently of consumption (its own sum baseline) so it can start
-        later than consumption and tolerate gaps: intervals with no price are
-        simply omitted rather than recorded as zero cost.
-        """
-        if not usage:
-            return
+        the sensor's long-term statistics, carried forward across recording
+        gaps (see _PriceMap). The cost statistic is tracked independently of
+        consumption (its own sum baseline) so it can start later than
+        consumption: intervals before the sensor's first known price are
+        omitted rather than recorded at a guessed or zero cost.
 
+        For the full-history (re)price, see _async_backfill_cost.
+        """
         cost_statistic_id = f"{DOMAIN}:{id_prefix}_energy_cost"
         self._statistic_ids.add(cost_statistic_id)
 
-        price_map = await self._async_get_price_map(
-            entity_id, min(usage), max(usage), interval
-        )
-        if not price_map:
-            _LOGGER.debug(
-                "No price statistics for %s; skipping cost for %s",
-                entity_id,
-                cost_statistic_id,
-            )
+        if not usage:
             return
 
+        usage_keys = sorted(usage)
+        price_map = await self._async_get_price_map(
+            entity_id, usage_keys[0], usage_keys[-1], interval
+        )
+        # With no long-term statistics, every interval is "pre-history" and
+        # this flat current-state fallback prices all of them. With a map
+        # present it stays None, so pre-first-price intervals are skipped.
+        pre_history_price: float | None = None
+        if not price_map:
+            pre_history_price = self._get_current_price(entity_id)
+            if pre_history_price is None:
+                # A price sensor with neither LTS in the usage window (~30 days)
+                # nor a numeric state is dead or misconfigured — surface it.
+                _LOGGER.warning(
+                    "Price sensor %s has no statistics in the usage window and "
+                    "no numeric state; skipping cost for %s",
+                    entity_id,
+                    cost_statistic_id,
+                )
+                return
+
+        # Resume the running sum from the last recorded cost point and append
+        # only newer intervals. Cost is price-gated, so the series is NOT
+        # contiguous like consumption; re-summing from the oldest bucket would
+        # drop skipped intervals and corrupt the sum (a new point's sum falling
+        # below the previous one's shows as negative cost).
         last_cost_stat = await get_instance(self.hass).async_add_executor_job(
             get_last_statistics,
             self.hass,
@@ -383,49 +480,74 @@ class DukeEnergyCoordinator(DataUpdateCoordinator[None]):
             True,  # noqa: FBT003
             {"sum"},
         )
-        if not last_cost_stat:
-            cost_sum = 0.0
-            last_cost_time: float | None = None
+        if last_cost_stat:
+            starting_sum = cast("float", last_cost_stat[cost_statistic_id][0]["sum"])  # pyright: ignore[reportTypedDictNotRequiredAccess]
+            last_cost_time: float | None = last_cost_stat[cost_statistic_id][0]["start"]  # pyright: ignore[reportTypedDictNotRequiredAccess]
         else:
-            stats = await get_instance(self.hass).async_add_executor_job(
-                statistics_during_period,
-                self.hass,
-                min(usage.keys()),
-                None,
-                {cost_statistic_id},
-                "hour" if interval == "HOURLY" else "day",
-                None,
-                {"sum"},
-            )
-            rows = stats.get(cost_statistic_id, [])
-            if rows:
-                cost_sum = cast("float", rows[0]["sum"])
-                last_cost_time = rows[0]["start"]
-            else:
-                # Existing cost stats predate the fetch window (e.g. the price
-                # sensor was unset for a while). Resume from the last known sum.
-                cost_sum = cast("float", last_cost_stat[cost_statistic_id][0]["sum"])  # pyright: ignore[reportTypedDictNotRequiredAccess]
-                last_cost_time = last_cost_stat[cost_statistic_id][0]["start"]  # pyright: ignore[reportTypedDictNotRequiredAccess]
+            starting_sum = 0.0
+            last_cost_time = None
 
-        cost_statistics = []
-        for start in sorted(usage):
-            if last_cost_time is not None and start.timestamp() <= last_cost_time:
-                continue
-            price = (
-                price_map.get(start.timestamp())
-                if interval == "HOURLY"
-                else price_map.get(start.date())
-            )
+        samples = (
+            (start, self._stat_start(start, interval), usage[start]["energy"])
+            for start in usage_keys
+            if last_cost_time is None or start.timestamp() > last_cost_time
+        )
+        self._write_cost_statistics(
+            cost_statistic_id=cost_statistic_id,
+            name_prefix=name_prefix,
+            samples=samples,
+            price_map=price_map,
+            pre_history_price=pre_history_price,
+            starting_sum=starting_sum,
+            log_verb="Adding",
+        )
+
+    def _write_cost_statistics(  # noqa: PLR0913
+        self,
+        *,
+        cost_statistic_id: str,
+        name_prefix: str,
+        samples: Iterable[tuple[datetime, datetime, float]],
+        price_map: _PriceMap,
+        pre_history_price: float | None,
+        starting_sum: float,
+        log_verb: str,
+    ) -> None:
+        """
+        Price each ``(lookup_dt, stat_start, energy)`` sample and write the series.
+
+        ``price_map.price_at`` supplies the carried-forward price; an interval
+        with no prior price falls back to ``pre_history_price`` (None skips it).
+        The running sum accumulates from ``starting_sum``.
+        """
+        cost_sum = starting_sum
+        cost_statistics: list[StatisticData] = []
+        for lookup_dt, stat_start, energy in samples:
+            price = price_map.price_at(lookup_dt)
+            if price is None:
+                price = pre_history_price
             if price is None:
                 continue
-            cost = usage[start]["energy"] * price
+            cost = energy * price
             cost_sum += cost
-            stat_start = start + timedelta(hours=12) if interval == "DAILY" else start
             cost_statistics.append(
                 StatisticData(start=stat_start, state=cost, sum=cost_sum)
             )
 
-        cost_metadata = StatisticMetaData(
+        _LOGGER.debug(
+            "%s %s statistics for %s", log_verb, len(cost_statistics), cost_statistic_id
+        )
+        async_add_external_statistics(
+            self.hass,
+            self._cost_metadata(cost_statistic_id, name_prefix),
+            cost_statistics,
+        )
+
+    def _cost_metadata(
+        self, cost_statistic_id: str, name_prefix: str
+    ) -> StatisticMetaData:
+        """Return the metadata for a meter's cost statistic."""
+        return StatisticMetaData(
             mean_type=StatisticMeanType.NONE,
             has_sum=True,
             name=f"{name_prefix} Cost",
@@ -435,12 +557,112 @@ class DukeEnergyCoordinator(DataUpdateCoordinator[None]):
             unit_of_measurement=self.hass.config.currency or "USD",
         )
 
-        _LOGGER.debug(
-            "Adding %s statistics for %s",
-            len(cost_statistics),
-            cost_statistic_id,
+    async def _async_backfill_cost(
+        self,
+        *,
+        entity_id: str,
+        id_prefix: str,
+        name_prefix: str,
+        interval: str,
+    ) -> None:
+        """
+        Reprice the full consumption history into the cost statistic.
+
+        Reads the stored consumption statistics (rather than re-fetching from
+        Duke) and prices every interval: gaps inside the price history carry
+        the most recent prior price forward (see _PriceMap), and intervals
+        that predate the sensor's history use the earliest available price —
+        a deliberate backward-fill that only this explicit full-history action
+        performs (the incremental path skips pre-history intervals instead).
+        The sum is rebuilt from zero across the whole series, overwriting any
+        incremental cost rows.
+        """
+        consumption_statistic_id = f"{DOMAIN}:{id_prefix}_energy_consumption"
+        cost_statistic_id = f"{DOMAIN}:{id_prefix}_energy_cost"
+
+        # Read at hourly resolution so the stored starts come back exactly as
+        # written (top-of-hour for electric, noon for gas) — a "day" period would
+        # re-bucket gas to midnight and misalign it against the incremental path.
+        # Consumption reaches back ~3 years; 4 years of headroom covers it.
+        history_start = dt_util.now() - timedelta(days=4 * 365)
+        consumption = await get_instance(self.hass).async_add_executor_job(
+            statistics_during_period,
+            self.hass,
+            history_start,
+            None,
+            {consumption_statistic_id},
+            "hour",
+            None,
+            {"state"},
         )
-        async_add_external_statistics(self.hass, cost_metadata, cost_statistics)
+        rows = sorted(
+            consumption.get(consumption_statistic_id, []),
+            key=lambda row: row["start"],
+        )
+        if not rows:
+            _LOGGER.debug(
+                "No consumption history to backfill for %s", cost_statistic_id
+            )
+            return
+
+        price_map = await self._async_get_price_map(
+            entity_id,
+            dt_util.utc_from_timestamp(rows[0]["start"]),
+            dt_util.utc_from_timestamp(rows[-1]["start"]),
+            interval,
+        )
+        # Pre-history intervals (before the sensor's first price) are
+        # backward-filled with the earliest known price; with no LTS map at all
+        # the whole history is repriced at the current state as a flat rate.
+        earliest_price = price_map.earliest
+        if earliest_price is None:
+            earliest_price = self._get_current_price(entity_id)
+            if earliest_price is None:
+                # The user explicitly requested a backfill; make its failure
+                # visible instead of completing silently with no cost data.
+                _LOGGER.warning(
+                    "No price statistics or current state to backfill cost for %s",
+                    cost_statistic_id,
+                )
+                return
+
+        tz = await dt_util.async_get_time_zone(_DUKE_TZ)
+        # An ET datetime satisfies both _PriceMap key derivations:
+        # .timestamp() is tz-independent and .date() needs Eastern. The stored
+        # start (already top-of-hour/noon) is reused verbatim as the stat start.
+        samples = (
+            (
+                datetime.fromtimestamp(row["start"], tz=tz),
+                dt_util.utc_from_timestamp(row["start"]),
+                row["state"],
+            )
+            for row in rows
+            if row.get("state") is not None
+        )
+        self._write_cost_statistics(
+            cost_statistic_id=cost_statistic_id,
+            name_prefix=name_prefix,
+            samples=samples,
+            price_map=price_map,
+            pre_history_price=earliest_price,
+            starting_sum=0.0,
+            log_verb="Backfilling",
+        )
+
+    def _get_current_price(self, entity_id: str) -> float | None:
+        """
+        Return the price sensor's current numeric state, or None.
+
+        Used as a flat-price fallback when the sensor has no long-term
+        statistics to read a per-interval price from.
+        """
+        state = self.hass.states.get(entity_id)
+        if state is None or state.state in (STATE_UNKNOWN, STATE_UNAVAILABLE, ""):
+            return None
+        try:
+            return float(state.state)
+        except (ValueError, TypeError):
+            return None
 
     async def _async_get_price_map(
         self,
@@ -448,12 +670,12 @@ class DukeEnergyCoordinator(DataUpdateCoordinator[None]):
         start: datetime,
         end: datetime,
         interval: str,
-    ) -> dict[float, float] | dict[date, float]:
+    ) -> _PriceMap:
         """
-        Return per-interval price from a sensor's long-term statistics.
+        Build a _PriceMap from a price sensor's long-term statistics.
 
         Always queries hourly means (aligned to the hour in UTC, so they match
-        the hourly usage keys exactly). For HOURLY meters the result is keyed by
+        the hourly usage keys exactly). For HOURLY meters the map is keyed by
         the hour's epoch timestamp; for DAILY meters the hourly means are
         averaged into each Eastern calendar day (keyed by ``date``), which keeps
         the day boundary correct regardless of the recorder's own timezone.
@@ -473,20 +695,28 @@ class DukeEnergyCoordinator(DataUpdateCoordinator[None]):
         rows = raw.get(entity_id, [])
 
         if interval == "HOURLY":
-            return {
-                row["start"]: row["mean"]
+            pairs: list[tuple[float | date, float]] = sorted(
+                (row["start"], row["mean"])
                 for row in rows
                 if row.get("mean") is not None
-            }
+            )
+        else:
+            tz = await dt_util.async_get_time_zone(_DUKE_TZ)
+            daily: dict[date, list[float]] = {}
+            for row in rows:
+                if row.get("mean") is None:
+                    continue
+                day = datetime.fromtimestamp(row["start"], tz=tz).date()
+                daily.setdefault(day, []).append(row["mean"])
+            pairs = sorted(
+                (day, sum(means) / len(means)) for day, means in daily.items()
+            )
 
-        tz = await dt_util.async_get_time_zone(_DUKE_TZ)
-        daily: dict[date, list[float]] = {}
-        for row in rows:
-            if row.get("mean") is None:
-                continue
-            day = datetime.fromtimestamp(row["start"], tz=tz).date()
-            daily.setdefault(day, []).append(row["mean"])
-        return {day: sum(means) / len(means) for day, means in daily.items()}
+        return _PriceMap(
+            interval=interval,
+            keys=[key for key, _ in pairs],
+            prices=[price for _, price in pairs],
+        )
 
     async def _async_get_energy_usage(
         self, meter: dict[str, Any], start_time: float | None = None

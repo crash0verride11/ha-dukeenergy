@@ -33,11 +33,17 @@
         "step": {
             "init": {
                 "title": "Cost tracking",
-                "description": "Select a price sensor for each meter to record energy cost alongside usage. The sensor must have long-term statistics (state class `measurement`). Leave a meter blank to skip cost tracking for it.\n\n{meters}"
+                "description": "Select a price sensor for each meter to record energy cost alongside usage. A sensor with long-term statistics (state class `measurement`) gives accurate per-hour historical cost; a sensor with only a current numeric value still works, priced at that value going forward. Leave a meter blank to skip cost tracking for it.\n\n{meters}",
+                "data": {
+                    "backfill_cost": "Backfill historical cost"
+                },
+                "data_description": {
+                    "backfill_cost": "Enabling this reloads the integration and populates cost for all past usage using the earliest price available from each sensor. Leave it off for normal operation; it turns itself back off once the backfill completes."
+                }
             }
         },
         "error": {
-            "no_statistics": "A selected sensor has no long-term statistics. Choose a sensor with state class `measurement`."
+            "no_price_data": "A selected sensor has neither long-term statistics nor a numeric current value, so it cannot price usage."
         },
         "abort": {
             "no_meters": "No supported electric or gas meters were found for this account."
