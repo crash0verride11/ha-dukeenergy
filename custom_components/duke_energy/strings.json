@@ -43,14 +43,14 @@
       },
       "meter": {
         "title": "Cost source",
-        "description": "Set the cost source for {meter}.\n\n- Entity: price from a `sensor`, `number`, or `input_number`. A sensor with long-term statistics (state class `measurement`) gives accurate per-hour historical cost; a `number`/`input_number` (or a stateless sensor) has no history, so it prices flat at its current value going forward — an easily editable rate you manage independently of this dialog (a backfill reprices all history at its current value).\n- Static: a fixed rate in {unit} applied to every interval, changed only here.\n- Off: no cost tracking (existing cost statistics are kept).",
+        "description": "Set the cost source for {meter}.\n\n- Entity price: the rate in {unit} comes from a `sensor`, `number`, or `input_number`. A sensor with long-term statistics prices each interval at its rate at the time; a `number`/`input_number` has no history and prices flat at its current value.\n- Static price: a fixed rate in {unit}, changed only here.\n- Disabled: no cost tracking (existing cost statistics are kept).",
         "data": {
           "mode": "Cost source",
           "entity_id": "Price entity",
           "price": "Static price"
         },
         "data_description": {
-          "entity_id": "Used when the cost source is Entity. Pick a sensor, number, or input_number holding the rate in {unit}.",
+          "entity_id": "Pick a sensor, number, or input_number holding the rate in {unit}.",
           "price": "Used when the cost source is Static. Enter the rate in {unit}."
         }
       },
@@ -67,9 +67,9 @@
     "selector": {
       "cost_mode": {
         "options": {
-          "sensor": "Entity (sensor / number / input_number)",
-          "static": "Static (fixed rate)",
-          "off": "Off (no cost tracking)"
+          "sensor": "Entity price",
+          "static": "Static price",
+          "off": "Disabled"
         }
       }
     },
