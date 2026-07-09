@@ -234,7 +234,7 @@ class DukeEnergyOptionsFlow(OptionsFlow):
                     "mode", default=defaults.get("mode", "off")
                 ): SelectSelector(
                     SelectSelectorConfig(
-                        options=["sensor", "static", "off"],
+                        options=["off", "sensor", "static"],
                         translation_key="cost_mode",
                         mode=SelectSelectorMode.LIST,
                     )

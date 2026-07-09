@@ -64,15 +64,6 @@
         }
       }
     },
-    "selector": {
-      "cost_mode": {
-        "options": {
-          "sensor": "Entity price",
-          "static": "Static price",
-          "off": "Disabled"
-        }
-      }
-    },
     "error": {
       "no_price_data": "The selected entity has neither long-term statistics nor a numeric current value, so it cannot price usage.",
       "entity_required": "Select a price entity, or choose a different cost source.",
@@ -81,6 +72,15 @@
     },
     "abort": {
       "no_meters": "No supported electric or gas meters were found for this account."
+    }
+  },
+  "selector": {
+    "cost_mode": {
+      "options": {
+        "off": "Do not track price",
+        "sensor": "Use an entity tracking current price",
+        "static": "Use a static current price"
+      }
     }
   }
 }
