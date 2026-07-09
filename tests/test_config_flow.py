@@ -258,12 +258,33 @@ _ELECTRIC_METER = {
 }
 
 
-async def test_options_flow_saves_selection(
+async def _menu_select(hass: HomeAssistant, flow_id: str, value: str) -> dict:
+    """Pick an option from the meter menu (init step)."""
+    return await hass.config_entries.options.async_configure(
+        flow_id, {"meter": value}
+    )
+
+
+async def _configure_meter(hass: HomeAssistant, flow_id: str, user_input: dict) -> dict:
+    """Submit the per-meter cost-source sub-step."""
+    return await hass.config_entries.options.async_configure(flow_id, user_input)
+
+
+async def _save(hass: HomeAssistant, flow_id: str, *, backfill: bool = False) -> dict:
+    """Pick Save from the menu and submit the save sub-step."""
+    result = await _menu_select(hass, flow_id, "save")
+    assert result["step_id"] == "save"
+    return await hass.config_entries.options.async_configure(
+        result["flow_id"], {"backfill_cost": backfill}
+    )
+
+
+async def test_options_flow_saves_sensor_mode(
     recorder_mock: object,
     enable_custom_integrations: object,
     hass: HomeAssistant,
 ) -> None:
-    """Selecting a price sensor with LTS stores it in cost_entities."""
+    """Sensor mode with a usable price entity stores structured cost_meters."""
     entry = _entry_with_meters(hass, _ELECTRIC_METER)
 
     with _patch_price_validation(has_lts=True):
@@ -271,51 +292,117 @@ async def test_options_flow_saves_selection(
         assert result["type"] is FlowResultType.FORM
         assert result["step_id"] == "init"
 
-        result = await hass.config_entries.options.async_configure(
+        result = await _menu_select(hass, result["flow_id"], "123")
+        assert result["step_id"] == "meter"
+        result = await _configure_meter(
+            hass,
             result["flow_id"],
-            {"123": "sensor.price", "backfill_cost": False},
+            {"mode": "sensor", "entity_id": "sensor.price"},
         )
+        # Returns to the menu; now save.
+        assert result["step_id"] == "init"
+        result = await _save(hass, result["flow_id"])
 
     assert result["type"] is FlowResultType.CREATE_ENTRY
-    assert entry.options["cost_entities"] == {"123": "sensor.price"}
+    assert entry.options["cost_meters"] == {
+        "123": {"mode": "sensor", "entity_id": "sensor.price"}
+    }
     assert entry.options["backfill_cost"] is False
 
 
-async def test_options_flow_blank_skips_meter(
+async def test_options_flow_saves_static_mode(
     recorder_mock: object,
     enable_custom_integrations: object,
     hass: HomeAssistant,
 ) -> None:
-    """Leaving a meter blank records no cost entity for it."""
+    """Static mode stores the fixed rate; no price entity required."""
     entry = _entry_with_meters(hass, _ELECTRIC_METER)
 
-    with _patch_price_validation(has_lts=True):
-        result = await hass.config_entries.options.async_init(entry.entry_id)
-        result = await hass.config_entries.options.async_configure(
-            result["flow_id"], {"backfill_cost": False}
-        )
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    result = await _menu_select(hass, result["flow_id"], "123")
+    result = await _configure_meter(
+        hass, result["flow_id"], {"mode": "static", "price": 0.1874}
+    )
+    assert result["step_id"] == "init"
+    result = await _save(hass, result["flow_id"])
 
     assert result["type"] is FlowResultType.CREATE_ENTRY
-    assert entry.options["cost_entities"] == {}
+    assert entry.options["cost_meters"] == {
+        "123": {"mode": "static", "price": 0.1874}
+    }
 
 
-async def test_options_flow_rejects_unusable_entity(
+async def test_options_flow_off_mode(
     recorder_mock: object,
     enable_custom_integrations: object,
     hass: HomeAssistant,
 ) -> None:
-    """A sensor with neither LTS nor a numeric state is rejected."""
+    """Off mode records an explicit disable for the meter."""
+    entry = _entry_with_meters(hass, _ELECTRIC_METER)
+
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    result = await _menu_select(hass, result["flow_id"], "123")
+    result = await _configure_meter(hass, result["flow_id"], {"mode": "off"})
+    result = await _save(hass, result["flow_id"])
+
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert entry.options["cost_meters"] == {"123": {"mode": "off"}}
+
+
+async def test_options_flow_sensor_mode_rejects_unusable_entity(
+    recorder_mock: object,
+    enable_custom_integrations: object,
+    hass: HomeAssistant,
+) -> None:
+    """Sensor mode with an unusable entity re-shows the meter form with an error."""
     entry = _entry_with_meters(hass, _ELECTRIC_METER)
 
     with _patch_price_validation(has_lts=False):
         result = await hass.config_entries.options.async_init(entry.entry_id)
-        # sensor.price has no state and no LTS.
-        result = await hass.config_entries.options.async_configure(
-            result["flow_id"], {"123": "sensor.price", "backfill_cost": False}
+        result = await _menu_select(hass, result["flow_id"], "123")
+        result = await _configure_meter(
+            hass,
+            result["flow_id"],
+            {"mode": "sensor", "entity_id": "sensor.price"},
         )
 
     assert result["type"] is FlowResultType.FORM
+    assert result["step_id"] == "meter"
     assert result["errors"] == {"base": "no_price_data"}
+
+
+async def test_options_flow_sensor_mode_requires_entity(
+    recorder_mock: object,
+    enable_custom_integrations: object,
+    hass: HomeAssistant,
+) -> None:
+    """Sensor mode with no entity selected errors rather than saving."""
+    entry = _entry_with_meters(hass, _ELECTRIC_METER)
+
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    result = await _menu_select(hass, result["flow_id"], "123")
+    result = await _configure_meter(hass, result["flow_id"], {"mode": "sensor"})
+
+    assert result["type"] is FlowResultType.FORM
+    assert result["errors"] == {"base": "entity_required"}
+
+
+async def test_options_flow_static_mode_requires_positive_price(
+    recorder_mock: object,
+    enable_custom_integrations: object,
+    hass: HomeAssistant,
+) -> None:
+    """Static mode rejects a non-positive rate."""
+    entry = _entry_with_meters(hass, _ELECTRIC_METER)
+
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    result = await _menu_select(hass, result["flow_id"], "123")
+    result = await _configure_meter(
+        hass, result["flow_id"], {"mode": "static", "price": 0}
+    )
+
+    assert result["type"] is FlowResultType.FORM
+    assert result["errors"] == {"base": "invalid_price"}
 
 
 async def test_options_flow_state_only_entity_allowed(
@@ -329,12 +416,18 @@ async def test_options_flow_state_only_entity_allowed(
 
     with _patch_price_validation(has_lts=False):
         result = await hass.config_entries.options.async_init(entry.entry_id)
-        result = await hass.config_entries.options.async_configure(
-            result["flow_id"], {"123": "sensor.price", "backfill_cost": False}
+        result = await _menu_select(hass, result["flow_id"], "123")
+        result = await _configure_meter(
+            hass,
+            result["flow_id"],
+            {"mode": "sensor", "entity_id": "sensor.price"},
         )
+        result = await _save(hass, result["flow_id"])
 
     assert result["type"] is FlowResultType.CREATE_ENTRY
-    assert entry.options["cost_entities"] == {"123": "sensor.price"}
+    assert entry.options["cost_meters"] == {
+        "123": {"mode": "sensor", "entity_id": "sensor.price"}
+    }
 
 
 async def test_options_flow_backfill_schedules_reload(
@@ -350,10 +443,13 @@ async def test_options_flow_backfill_schedules_reload(
         patch.object(hass.config_entries, "async_schedule_reload") as mock_reload,
     ):
         result = await hass.config_entries.options.async_init(entry.entry_id)
-        result = await hass.config_entries.options.async_configure(
+        result = await _menu_select(hass, result["flow_id"], "123")
+        result = await _configure_meter(
+            hass,
             result["flow_id"],
-            {"123": "sensor.price", "backfill_cost": True},
+            {"mode": "sensor", "entity_id": "sensor.price"},
         )
+        result = await _save(hass, result["flow_id"], backfill=True)
 
     assert result["type"] is FlowResultType.CREATE_ENTRY
     assert entry.options["backfill_cost"] is True
