@@ -242,7 +242,9 @@ class DukeEnergyOptionsFlow(OptionsFlow):
                 vol.Optional(
                     "entity_id",
                     description={"suggested_value": defaults.get("entity_id")},
-                ): EntitySelector(EntitySelectorConfig(domain="sensor")),
+                ): EntitySelector(
+                    EntitySelectorConfig(domain=["sensor", "input_number", "number"])
+                ),
                 vol.Optional(
                     "price",
                     description={"suggested_value": defaults.get("price")},

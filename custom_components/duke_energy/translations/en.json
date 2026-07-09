@@ -43,14 +43,14 @@
             },
             "meter": {
                 "title": "Cost source",
-                "description": "Set the cost source for {meter}.\n\n- Sensor: price from a sensor's long-term statistics (state class `measurement`) for accurate per-hour historical cost, or its current numeric value going forward.\n- Static: a fixed rate in {unit} applied to every interval.\n- Off: no cost tracking (existing cost statistics are kept).",
+                "description": "Set the cost source for {meter}.\n\n- Entity: price from a `sensor`, `number`, or `input_number`. A sensor with long-term statistics (state class `measurement`) gives accurate per-hour historical cost; a `number`/`input_number` (or a stateless sensor) has no history, so it prices flat at its current value going forward — an easily editable rate you manage independently of this dialog (a backfill reprices all history at its current value).\n- Static: a fixed rate in {unit} applied to every interval, changed only here.\n- Off: no cost tracking (existing cost statistics are kept).",
                 "data": {
                     "mode": "Cost source",
-                    "entity_id": "Price sensor",
+                    "entity_id": "Price entity",
                     "price": "Static price"
                 },
                 "data_description": {
-                    "entity_id": "Used when the cost source is Sensor. Expected units: {unit}.",
+                    "entity_id": "Used when the cost source is Entity. Pick a sensor, number, or input_number holding the rate in {unit}.",
                     "price": "Used when the cost source is Static. Enter the rate in {unit}."
                 }
             },
@@ -67,15 +67,15 @@
         "selector": {
             "cost_mode": {
                 "options": {
-                    "sensor": "Sensor (price entity)",
+                    "sensor": "Entity (sensor / number / input_number)",
                     "static": "Static (fixed rate)",
                     "off": "Off (no cost tracking)"
                 }
             }
         },
         "error": {
-            "no_price_data": "The selected sensor has neither long-term statistics nor a numeric current value, so it cannot price usage.",
-            "entity_required": "Select a price sensor, or choose a different cost source.",
+            "no_price_data": "The selected entity has neither long-term statistics nor a numeric current value, so it cannot price usage.",
+            "entity_required": "Select a price entity, or choose a different cost source.",
             "price_required": "Enter a static price, or choose a different cost source.",
             "invalid_price": "The static price must be a positive number."
         },
