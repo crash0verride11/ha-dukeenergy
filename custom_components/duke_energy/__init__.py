@@ -5,7 +5,6 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
-from .aiodukeenergy import DukeEnergy
 from homeassistant.components.recorder import (
     get_instance,  # pyright: ignore[reportPrivateImportUsage]
 )
@@ -13,6 +12,7 @@ from homeassistant.components.recorder.statistics import list_statistic_ids
 from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers import aiohttp_client, config_entry_oauth2_flow
 
+from .aiodukeenergy import DukeEnergy
 from .api import DukeEnergyAuth
 from .const import DOMAIN
 from .coordinator import DukeEnergyConfigEntry, DukeEnergyCoordinator

@@ -5,10 +5,9 @@ import logging
 from bisect import bisect_right
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
-from datetime import date, datetime, time, timedelta
+from datetime import date, datetime, time, timedelta, tzinfo
 from typing import Any, cast
 
-from .aiodukeenergy import DukeEnergy, DukeEnergyAuthError
 from aiohttp import ClientError
 from homeassistant.components.recorder import (
     get_instance,  # pyright: ignore[reportPrivateImportUsage]
@@ -38,6 +37,7 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from homeassistant.util import dt as dt_util
 from homeassistant.util.unit_conversion import EnergyConverter
 
+from .aiodukeenergy import DukeEnergy, DukeEnergyAuthError
 from .const import DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
@@ -141,8 +141,12 @@ class DukeEnergyCoordinator(DataUpdateCoordinator[None]):
             self._unsub_scheduled = None
 
     def _get_or_create_daily_offset(self, day: date) -> timedelta:
-        """Return a stable deterministic offset for the given day, derived from
-        the config entry ID and date so it varies per-user and per-day."""
+        """
+        Return a stable deterministic offset for the given day.
+
+        Derived from the config entry ID and date so it varies per-user
+        and per-day.
+        """
         if self._offset_date != day:
             key = f"{self.config_entry.entry_id}:{day.isoformat()}".encode()
             digest = int(hashlib.sha256(key).hexdigest()[:8], 16)
@@ -153,9 +157,12 @@ class DukeEnergyCoordinator(DataUpdateCoordinator[None]):
             _LOGGER.debug("Daily polling offset for %s: %s", day, self._daily_offset)
         return self._daily_offset  # type: ignore[return-value]
 
-    def _schedule_next_check(self, tz, *, had_success: bool) -> None:
-        """Schedule the next data check near 7am, 2pm, or 7pm ET, with a
-        per-user per-day offset of up to ±2 hours."""
+    def _schedule_next_check(self, tz: tzinfo, *, had_success: bool) -> None:
+        """
+        Schedule the next data check near 7am, 2pm, or 7pm ET.
+
+        Applies a per-user per-day offset of up to ±2 hours.
+        """
         if self._unsub_scheduled is not None:
             self._unsub_scheduled()
             self._unsub_scheduled = None
@@ -166,7 +173,9 @@ class DukeEnergyCoordinator(DataUpdateCoordinator[None]):
         if not had_success:
             today_offset = self._get_or_create_daily_offset(now.date())
             for base_time in _BASE_TIMES_ET:
-                candidate = datetime.combine(now.date(), base_time, tzinfo=tz) + today_offset
+                candidate = (
+                    datetime.combine(now.date(), base_time, tzinfo=tz) + today_offset
+                )
                 if candidate > now:
                     next_time = candidate
                     break
@@ -175,7 +184,10 @@ class DukeEnergyCoordinator(DataUpdateCoordinator[None]):
             # Success, or no remaining windows today — schedule for first slot tomorrow.
             tomorrow = now.date() + timedelta(days=1)
             tomorrow_offset = self._get_or_create_daily_offset(tomorrow)
-            next_time = datetime.combine(tomorrow, _BASE_TIMES_ET[0], tzinfo=tz) + tomorrow_offset
+            next_time = (
+                datetime.combine(tomorrow, _BASE_TIMES_ET[0], tzinfo=tz)
+                + tomorrow_offset
+            )
 
         _LOGGER.debug("Next Duke Energy check scheduled for %s", next_time)
 
@@ -274,7 +286,10 @@ class DukeEnergyCoordinator(DataUpdateCoordinator[None]):
                 consumption_statistics = []
 
                 for start, data in usage.items():
-                    if last_stats_time is not None and start.timestamp() <= last_stats_time:
+                    if (
+                        last_stats_time is not None
+                        and start.timestamp() <= last_stats_time
+                    ):
                         continue
                     consumption_sum += data["energy"]
                     consumption_statistics.append(
@@ -356,7 +371,10 @@ class DukeEnergyCoordinator(DataUpdateCoordinator[None]):
                 temperature_statistics = []
                 for day, temps in sorted(daily_temps.items()):
                     stat_start = datetime.combine(day, time(12, 0), tzinfo=tz)
-                    if last_temp_time is not None and stat_start.timestamp() <= last_temp_time:
+                    if (
+                        last_temp_time is not None
+                        and stat_start.timestamp() <= last_temp_time
+                    ):
                         continue
                     temperature_statistics.append(
                         StatisticData(start=stat_start, mean=temps[0])
@@ -392,7 +410,10 @@ class DukeEnergyCoordinator(DataUpdateCoordinator[None]):
                     options={**self.config_entry.options, "backfill_cost": False},
                 )
 
-            if supported_meter_count > 0 and yesterday_data_count == supported_meter_count:
+            if (
+                supported_meter_count > 0
+                and yesterday_data_count == supported_meter_count
+            ):
                 self._last_successful_date = today
 
         finally:
@@ -400,7 +421,10 @@ class DukeEnergyCoordinator(DataUpdateCoordinator[None]):
             if had_success:
                 _LOGGER.debug("Duke Energy data retrieval successful")
             else:
-                _LOGGER.debug("No new Duke Energy usage data available; will retry at next scheduled time")
+                _LOGGER.debug(
+                    "No new Duke Energy usage data available; "
+                    "will retry at next scheduled time"
+                )
             self._schedule_next_check(tz, had_success=had_success)
 
     @staticmethod
