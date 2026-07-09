@@ -195,10 +195,10 @@ class DukeEnergyCoordinator(DataUpdateCoordinator[None]):
         supported_meter_count = 0
         yesterday_data_count = 0
         temp_accounts_seen: set[str] = set()
-        cost_entities: dict[str, str] = self.config_entry.options.get(
-            "cost_entities", {}
+        cost_meters: dict[str, dict[str, Any]] = self.config_entry.options.get(
+            "cost_meters", {}
         )
-        do_backfill = bool(cost_entities) and self.config_entry.options.get(
+        do_backfill = bool(cost_meters) and self.config_entry.options.get(
             "backfill_cost", False
         )
 
@@ -311,22 +311,16 @@ class DukeEnergyCoordinator(DataUpdateCoordinator[None]):
                     self.hass, consumption_metadata, consumption_statistics
                 )
 
-                # Cost statistic (only for meters with a configured price sensor)
-                cost_entity_id = cost_entities.get(serial_number)
-                if cost_entity_id and do_backfill:
-                    await self._async_backfill_cost(
-                        entity_id=cost_entity_id,
-                        id_prefix=id_prefix,
-                        name_prefix=name_prefix,
-                        interval=interval,
-                    )
-                elif cost_entity_id:
-                    await self._async_add_cost_statistics(
-                        entity_id=cost_entity_id,
+                # Cost statistic (per-meter mode: sensor / static / off)
+                cost_config = cost_meters.get(serial_number)
+                if cost_config:
+                    await self._async_update_cost(
+                        cost_config=cost_config,
                         id_prefix=id_prefix,
                         name_prefix=name_prefix,
                         usage=usage,
                         interval=interval,
+                        do_backfill=do_backfill,
                     )
 
                 # Temperature statistic (first meter per account only)
@@ -419,22 +413,71 @@ class DukeEnergyCoordinator(DataUpdateCoordinator[None]):
         """
         return start + timedelta(hours=12) if interval == "DAILY" else start
 
-    async def _async_add_cost_statistics(
+    async def _async_update_cost(  # noqa: PLR0913
         self,
         *,
-        entity_id: str,
+        cost_config: dict[str, Any],
+        id_prefix: str,
+        name_prefix: str,
+        usage: dict[datetime, dict[str, float | int]],
+        interval: str,
+        do_backfill: bool,
+    ) -> None:
+        """
+        Route a meter's cost update according to its configured mode.
+
+        ``sensor`` prices from a price entity's statistics/state; ``static``
+        prices every interval at a fixed rate; anything else (``off`` or an
+        unconfigured meter) skips cost entirely, leaving existing cost
+        statistics untouched. Backfill and incremental paths share the flat
+        rate, so a static rate can also (re)price full history.
+        """
+        mode = cost_config.get("mode")
+        if mode not in ("sensor", "static"):
+            return
+        entity_id = cost_config.get("entity_id")
+        static_price = cost_config.get("price") if mode == "static" else None
+        if mode == "sensor" and not entity_id:
+            return
+        if mode == "static" and static_price is None:
+            return
+
+        if do_backfill:
+            await self._async_backfill_cost(
+                entity_id=entity_id,
+                static_price=static_price,
+                id_prefix=id_prefix,
+                name_prefix=name_prefix,
+                interval=interval,
+            )
+        else:
+            await self._async_add_cost_statistics(
+                entity_id=entity_id,
+                static_price=static_price,
+                id_prefix=id_prefix,
+                name_prefix=name_prefix,
+                usage=usage,
+                interval=interval,
+            )
+
+    async def _async_add_cost_statistics(  # noqa: PLR0913
+        self,
+        *,
+        entity_id: str | None,
+        static_price: float | None,
         id_prefix: str,
         name_prefix: str,
         usage: dict[datetime, dict[str, float | int]],
         interval: str,
     ) -> None:
         """
-        Derive and insert a cost statistic for a meter from a price sensor.
+        Derive and insert a cost statistic for a meter.
 
-        Cost is ``consumption * price`` per interval, where price is read from
-        the sensor's long-term statistics, carried forward across recording
-        gaps (see _PriceMap). The cost statistic is tracked independently of
-        consumption (its own sum baseline) so it can start later than
+        Cost is ``consumption * price`` per interval. In sensor mode the price
+        is read from the entity's long-term statistics, carried forward across
+        recording gaps (see _PriceMap); in static mode a fixed ``static_price``
+        applies to every interval. The cost statistic is tracked independently
+        of consumption (its own sum baseline) so it can start later than
         consumption: intervals before the sensor's first known price are
         omitted rather than recorded at a guessed or zero cost.
 
@@ -447,25 +490,33 @@ class DukeEnergyCoordinator(DataUpdateCoordinator[None]):
             return
 
         usage_keys = sorted(usage)
-        price_map = await self._async_get_price_map(
-            entity_id, usage_keys[0], usage_keys[-1], interval
-        )
-        # With no long-term statistics, every interval is "pre-history" and
-        # this flat current-state fallback prices all of them. With a map
-        # present it stays None, so pre-first-price intervals are skipped.
-        pre_history_price: float | None = None
-        if not price_map:
-            pre_history_price = self._get_current_price(entity_id)
-            if pre_history_price is None:
-                # A price sensor with neither LTS in the usage window (~30 days)
-                # nor a numeric state is dead or misconfigured — surface it.
-                _LOGGER.warning(
-                    "Price sensor %s has no statistics in the usage window and "
-                    "no numeric state; skipping cost for %s",
-                    entity_id,
-                    cost_statistic_id,
-                )
+        # A static rate is a flat price at every interval: an empty map (so
+        # price_at() always returns None) plus the rate as the fallback price.
+        if static_price is not None:
+            price_map = _PriceMap(interval, [], [])
+            pre_history_price: float | None = static_price
+        else:
+            if entity_id is None:
                 return
+            price_map = await self._async_get_price_map(
+                entity_id, usage_keys[0], usage_keys[-1], interval
+            )
+            # With no long-term statistics, every interval is "pre-history" and
+            # this flat current-state fallback prices all of them. With a map
+            # present it stays None, so pre-first-price intervals are skipped.
+            pre_history_price = None
+            if not price_map:
+                pre_history_price = self._get_current_price(entity_id)
+                if pre_history_price is None:
+                    # A price sensor with neither LTS in the usage window
+                    # (~30 days) nor a numeric state is dead/misconfigured.
+                    _LOGGER.warning(
+                        "Price sensor %s has no statistics in the usage window "
+                        "and no numeric state; skipping cost for %s",
+                        entity_id,
+                        cost_statistic_id,
+                    )
+                    return
 
         # Resume the running sum from the last recorded cost point and append
         # only newer intervals. Cost is price-gated, so the series is NOT
@@ -560,7 +611,8 @@ class DukeEnergyCoordinator(DataUpdateCoordinator[None]):
     async def _async_backfill_cost(
         self,
         *,
-        entity_id: str,
+        entity_id: str | None,
+        static_price: float | None,
         id_prefix: str,
         name_prefix: str,
         interval: str,
@@ -569,11 +621,12 @@ class DukeEnergyCoordinator(DataUpdateCoordinator[None]):
         Reprice the full consumption history into the cost statistic.
 
         Reads the stored consumption statistics (rather than re-fetching from
-        Duke) and prices every interval: gaps inside the price history carry
-        the most recent prior price forward (see _PriceMap), and intervals
-        that predate the sensor's history use the earliest available price —
-        a deliberate backward-fill that only this explicit full-history action
-        performs (the incremental path skips pre-history intervals instead).
+        Duke) and prices every interval. In sensor mode, gaps inside the price
+        history carry the most recent prior price forward (see _PriceMap), and
+        intervals that predate the sensor's history use the earliest available
+        price — a deliberate backward-fill that only this explicit full-history
+        action performs (the incremental path skips pre-history intervals
+        instead). In static mode every interval is priced at ``static_price``.
         The sum is rebuilt from zero across the whole series, overwriting any
         incremental cost rows.
         """
@@ -605,26 +658,34 @@ class DukeEnergyCoordinator(DataUpdateCoordinator[None]):
             )
             return
 
-        price_map = await self._async_get_price_map(
-            entity_id,
-            dt_util.utc_from_timestamp(rows[0]["start"]),
-            dt_util.utc_from_timestamp(rows[-1]["start"]),
-            interval,
-        )
-        # Pre-history intervals (before the sensor's first price) are
-        # backward-filled with the earliest known price; with no LTS map at all
-        # the whole history is repriced at the current state as a flat rate.
-        earliest_price = price_map.earliest
-        if earliest_price is None:
-            earliest_price = self._get_current_price(entity_id)
-            if earliest_price is None:
-                # The user explicitly requested a backfill; make its failure
-                # visible instead of completing silently with no cost data.
-                _LOGGER.warning(
-                    "No price statistics or current state to backfill cost for %s",
-                    cost_statistic_id,
-                )
+        # A static rate prices the whole history flat: empty map, rate as the
+        # (backward-filled) fallback for every interval.
+        if static_price is not None:
+            price_map = _PriceMap(interval, [], [])
+            earliest_price: float | None = static_price
+        else:
+            if entity_id is None:
                 return
+            price_map = await self._async_get_price_map(
+                entity_id,
+                dt_util.utc_from_timestamp(rows[0]["start"]),
+                dt_util.utc_from_timestamp(rows[-1]["start"]),
+                interval,
+            )
+            # Pre-history intervals (before the sensor's first price) are
+            # backward-filled with the earliest known price; with no LTS map at
+            # all the whole history is repriced at the current state as a flat rate.
+            earliest_price = price_map.earliest
+            if earliest_price is None:
+                earliest_price = self._get_current_price(entity_id)
+                if earliest_price is None:
+                    # The user explicitly requested a backfill; make its failure
+                    # visible instead of completing silently with no cost data.
+                    _LOGGER.warning(
+                        "No price statistics or current state to backfill cost for %s",
+                        cost_statistic_id,
+                    )
+                    return
 
         tz = await dt_util.async_get_time_zone(_DUKE_TZ)
         # An ET datetime satisfies both _PriceMap key derivations:

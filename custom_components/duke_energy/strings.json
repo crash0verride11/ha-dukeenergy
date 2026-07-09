@@ -33,17 +33,51 @@
     "step": {
       "init": {
         "title": "Cost tracking",
-        "description": "Select a price sensor for each meter to record energy cost alongside usage. A sensor with long-term statistics (state class `measurement`) gives accurate per-hour historical cost; a sensor with only a current numeric value still works, priced at that value going forward. Leave a meter blank to skip cost tracking for it.\n\n{meters}",
+        "description": "Configure how energy cost is recorded alongside usage. Pick a meter to set its cost source, then choose Save to apply.",
+        "data": {
+          "meter": "Meter"
+        },
+        "data_description": {
+          "meter": "Choose a meter to configure, or Save and apply to finish."
+        }
+      },
+      "meter": {
+        "title": "Cost source",
+        "description": "Set the cost source for {meter}.\n\n- Sensor: price from a sensor's long-term statistics (state class `measurement`) for accurate per-hour historical cost, or its current numeric value going forward.\n- Static: a fixed rate in {unit} applied to every interval.\n- Off: no cost tracking (existing cost statistics are kept).",
+        "data": {
+          "mode": "Cost source",
+          "entity_id": "Price sensor",
+          "price": "Static price"
+        },
+        "data_description": {
+          "entity_id": "Used when the cost source is Sensor. Expected units: {unit}.",
+          "price": "Used when the cost source is Static. Enter the rate in {unit}."
+        }
+      },
+      "save": {
+        "title": "Save cost tracking",
         "data": {
           "backfill_cost": "Backfill historical cost"
         },
         "data_description": {
-          "backfill_cost": "Enabling this reloads the integration and populates cost for all past usage using the earliest price available from each sensor. Leave it off for normal operation; it turns itself back off once the backfill completes."
+          "backfill_cost": "Enabling this reloads the integration and reprices all past usage for every configured meter (using the earliest/static price available). Leave it off for normal operation; it turns itself back off once the backfill completes."
+        }
+      }
+    },
+    "selector": {
+      "cost_mode": {
+        "options": {
+          "sensor": "Sensor (price entity)",
+          "static": "Static (fixed rate)",
+          "off": "Off (no cost tracking)"
         }
       }
     },
     "error": {
-      "no_price_data": "A selected sensor has neither long-term statistics nor a numeric current value, so it cannot price usage."
+      "no_price_data": "The selected sensor has neither long-term statistics nor a numeric current value, so it cannot price usage.",
+      "entity_required": "Select a price sensor, or choose a different cost source.",
+      "price_required": "Enter a static price, or choose a different cost source.",
+      "invalid_price": "The static price must be a positive number."
     },
     "abort": {
       "no_meters": "No supported electric or gas meters were found for this account."
