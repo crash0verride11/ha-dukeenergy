@@ -9,9 +9,10 @@ from contextlib import contextmanager
 from typing import Any
 from unittest.mock import AsyncMock, Mock, patch
 
+import pytest
 from homeassistant import config_entries
 from homeassistant.core import HomeAssistant
-from homeassistant.data_entry_flow import FlowResultType
+from homeassistant.data_entry_flow import FlowResultType, InvalidData
 
 # Importing the flow handler registers it in config_entries.HANDLERS["duke_energy"].
 from custom_components.duke_energy.config_flow import DukeEnergyOAuth2FlowHandler  # noqa: F401
@@ -260,9 +261,7 @@ _ELECTRIC_METER = {
 
 async def _menu_select(hass: HomeAssistant, flow_id: str, value: str) -> dict:
     """Pick an option from the meter menu (init step)."""
-    return await hass.config_entries.options.async_configure(
-        flow_id, {"meter": value}
-    )
+    return await hass.config_entries.options.async_configure(flow_id, {"meter": value})
 
 
 async def _configure_meter(hass: HomeAssistant, flow_id: str, user_input: dict) -> dict:
@@ -327,9 +326,7 @@ async def test_options_flow_saves_static_mode(
     result = await _save(hass, result["flow_id"])
 
     assert result["type"] is FlowResultType.CREATE_ENTRY
-    assert entry.options["cost_meters"] == {
-        "123": {"mode": "static", "price": 0.1874}
-    }
+    assert entry.options["cost_meters"] == {"123": {"mode": "static", "price": 0.1874}}
 
 
 async def test_options_flow_off_mode(
@@ -454,3 +451,99 @@ async def test_options_flow_backfill_schedules_reload(
     assert result["type"] is FlowResultType.CREATE_ENTRY
     assert entry.options["backfill_cost"] is True
     mock_reload.assert_called_once_with(entry.entry_id)
+
+
+async def test_options_flow_static_mode_stores_fixed_cost(
+    recorder_mock: object,
+    enable_custom_integrations: object,
+    hass: HomeAssistant,
+) -> None:
+    """A static fixed monthly cost is stored alongside the rate."""
+    entry = _entry_with_meters(hass, _ELECTRIC_METER)
+
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    result = await _menu_select(hass, result["flow_id"], "123")
+    result = await _configure_meter(
+        hass,
+        result["flow_id"],
+        {"mode": "static", "price": 0.1874, "fixed_monthly_cost": 14.88},
+    )
+    assert result["step_id"] == "init"
+    result = await _save(hass, result["flow_id"])
+
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert entry.options["cost_meters"] == {
+        "123": {"mode": "static", "price": 0.1874, "fixed_monthly_cost": 14.88}
+    }
+
+
+async def test_options_flow_zero_fixed_cost_stores_no_key(
+    recorder_mock: object,
+    enable_custom_integrations: object,
+    hass: HomeAssistant,
+) -> None:
+    """A zero fixed cost leaves the meter configured as if it never existed."""
+    entry = _entry_with_meters(hass, _ELECTRIC_METER)
+
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    result = await _menu_select(hass, result["flow_id"], "123")
+    result = await _configure_meter(
+        hass,
+        result["flow_id"],
+        {"mode": "static", "price": 0.1874, "fixed_monthly_cost": 0},
+    )
+    result = await _save(hass, result["flow_id"])
+
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert entry.options["cost_meters"] == {"123": {"mode": "static", "price": 0.1874}}
+
+
+async def test_options_flow_rejects_negative_fixed_cost(
+    recorder_mock: object,
+    enable_custom_integrations: object,
+    hass: HomeAssistant,
+) -> None:
+    """A negative fixed monthly cost is refused by the selector's own min=0."""
+    entry = _entry_with_meters(hass, _ELECTRIC_METER)
+
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    result = await _menu_select(hass, result["flow_id"], "123")
+    with pytest.raises(InvalidData, match="fixed_monthly_cost"):
+        await _configure_meter(
+            hass,
+            result["flow_id"],
+            {"mode": "static", "price": 0.1874, "fixed_monthly_cost": -1.0},
+        )
+
+
+async def test_options_flow_sensor_mode_stores_fixed_cost_entity(
+    recorder_mock: object,
+    enable_custom_integrations: object,
+    hass: HomeAssistant,
+) -> None:
+    """Sensor mode stores a fixed cost entity beside the price entity."""
+    entry = _entry_with_meters(hass, _ELECTRIC_METER)
+
+    with _patch_price_validation(has_lts=True):
+        result = await hass.config_entries.options.async_init(entry.entry_id)
+        result = await _menu_select(hass, result["flow_id"], "123")
+        result = await _configure_meter(
+            hass,
+            result["flow_id"],
+            {
+                "mode": "sensor",
+                "entity_id": "sensor.price",
+                "fixed_cost_entity_id": "sensor.fixed_cost",
+            },
+        )
+        assert result["step_id"] == "init"
+        result = await _save(hass, result["flow_id"])
+
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert entry.options["cost_meters"] == {
+        "123": {
+            "mode": "sensor",
+            "entity_id": "sensor.price",
+            "fixed_cost_entity_id": "sensor.fixed_cost",
+        }
+    }

@@ -520,3 +520,224 @@ async def test_cost_mode_off_skips(
 
     assert coordinator.last_update_success is True
     assert "duke_energy:electric_123_energy_cost" not in stats_store.data
+
+
+async def test_fixed_cost_static_incremental(
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+    mock_api_with_meters: AsyncMock,
+    stats_store: StatsStore,
+) -> None:
+    """A static fixed monthly cost is spread across the month's hours."""
+    mock_config_entry.add_to_hass(hass)
+    _set_cost_meters(
+        hass,
+        mock_config_entry,
+        {"123": {"mode": "static", "price": 0.10, "fixed_monthly_cost": 74.40}},
+    )
+    # January has 31 days -> 744 hourly intervals, so the share is exactly $0.10.
+    et = ZoneInfo("America/New_York")
+    reading = datetime(2024, 1, 15, 10, 0, tzinfo=et)
+    mock_api_with_meters.get_energy_usage.return_value = {
+        "data": {reading: {"energy": 1.3, "temperature": 70}},
+        "missing": [],
+    }
+
+    coordinator = DukeEnergyCoordinator(hass, mock_api_with_meters, mock_config_entry)
+    await coordinator.async_refresh()
+    await hass.async_block_till_done()
+
+    assert coordinator.last_update_success is True
+    _, statistics = _call_for(stats_store, "duke_energy:electric_123_energy_cost")
+    # 1.3 kWh x $0.10 = 0.13, plus 74.40/744 = 0.10.
+    assert statistics[0]["state"] == pytest.approx(0.23)
+    assert statistics[0]["sum"] == pytest.approx(0.23)
+
+
+async def test_fixed_cost_gas_uses_daily_denominator(
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+    mock_api_with_gas_meter: AsyncMock,
+    stats_store: StatsStore,
+) -> None:
+    """A gas meter divides the fixed cost by days, not hours."""
+    mock_config_entry.add_to_hass(hass)
+    _set_cost_meters(
+        hass,
+        mock_config_entry,
+        {"456": {"mode": "static", "price": 0.50, "fixed_monthly_cost": 31.0}},
+    )
+    et = ZoneInfo("America/New_York")
+    reading = datetime(2024, 1, 15, 0, 0, tzinfo=et)
+    mock_api_with_gas_meter.get_energy_usage.return_value = {
+        "data": {reading: {"energy": 2.5, "temperature": 68}},
+        "missing": [],
+    }
+
+    coordinator = DukeEnergyCoordinator(
+        hass, mock_api_with_gas_meter, mock_config_entry
+    )
+    await coordinator.async_refresh()
+    await hass.async_block_till_done()
+
+    assert coordinator.last_update_success is True
+    _, statistics = _call_for(stats_store, "duke_energy:gas_456_energy_cost")
+    # 2.5 CCF x $0.50 = 1.25, plus 31.00/31 days = 1.00.
+    assert statistics[0]["state"] == pytest.approx(2.25)
+
+
+async def test_fixed_cost_backfill_denominator_is_per_month(
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+    mock_api_with_gas_meter: AsyncMock,
+    stats_store: StatsStore,
+) -> None:
+    """Each row's share follows the length of its own calendar month."""
+    mock_config_entry.add_to_hass(hass)
+    _set_cost_meters(
+        hass,
+        mock_config_entry,
+        {"456": {"mode": "static", "price": 0.0, "fixed_monthly_cost": 87.0}},
+        backfill=True,
+    )
+    et = ZoneInfo("America/New_York")
+    jan = datetime(2024, 1, 31, 12, 0, tzinfo=et)
+    feb = datetime(2024, 2, 1, 12, 0, tzinfo=et)
+    # Keep the incoming reading inside the seeded window so the incremental
+    # consumption path finds its sum baseline.
+    mock_api_with_gas_meter.get_energy_usage.return_value = {
+        "data": {
+            datetime(2024, 2, 1, 0, 0, tzinfo=et): {"energy": 1.0, "temperature": 68}
+        },
+        "missing": [],
+    }
+    stats_store.seed(
+        "duke_energy:gas_456_energy_consumption",
+        [
+            {"start": jan, "state": 1.0, "sum": 1.0},
+            {"start": feb, "state": 1.0, "sum": 2.0},
+        ],
+    )
+
+    coordinator = DukeEnergyCoordinator(
+        hass, mock_api_with_gas_meter, mock_config_entry
+    )
+    await coordinator.async_refresh()
+    await hass.async_block_till_done()
+
+    assert coordinator.last_update_success is True
+    cost_rows = stats_store.data["duke_energy:gas_456_energy_cost"]
+    # Price is zero, so each row is purely its month's share: January has 31
+    # days, February 2024 has 29.
+    assert [r["state"] for r in cost_rows] == pytest.approx([87.0 / 31, 87.0 / 29])
+
+
+async def test_fixed_cost_entity_carried_forward(
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+    mock_api_with_meters: AsyncMock,
+    stats_store: StatsStore,
+) -> None:
+    """A fixed cost entity carries its last known value across a gap."""
+    mock_config_entry.add_to_hass(hass)
+    _set_cost_meters(
+        hass,
+        mock_config_entry,
+        {
+            "123": {
+                "mode": "sensor",
+                "entity_id": "sensor.price",
+                "fixed_cost_entity_id": "sensor.fixed_cost",
+            }
+        },
+    )
+    et = ZoneInfo("America/New_York")
+    t0 = datetime(2024, 1, 15, 10, 0, tzinfo=et)
+    t1 = t0 + timedelta(hours=1)
+    mock_api_with_meters.get_energy_usage.return_value = {
+        "data": {
+            t0: {"energy": 1.0, "temperature": 70},
+            t1: {"energy": 1.0, "temperature": 70},
+        },
+        "missing": [],
+    }
+    stats_store.seed(
+        "sensor.price", [{"start": t0, "mean": 0.10}, {"start": t1, "mean": 0.10}]
+    )
+    # Only t0 has a fixed cost statistic; t1 must carry it forward.
+    stats_store.seed("sensor.fixed_cost", [{"start": t0, "mean": 74.40}])
+
+    coordinator = DukeEnergyCoordinator(hass, mock_api_with_meters, mock_config_entry)
+    await coordinator.async_refresh()
+    await hass.async_block_till_done()
+
+    assert coordinator.last_update_success is True
+    cost_rows = stats_store.data["duke_energy:electric_123_energy_cost"]
+    # Both hours: 1.0 kWh x $0.10 + 74.40/744.
+    assert [r["state"] for r in cost_rows] == pytest.approx([0.20, 0.20])
+
+
+async def test_fixed_cost_head_contributes_zero(
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+    mock_api_with_meters: AsyncMock,
+    stats_store: StatsStore,
+) -> None:
+    """A priced interval predating the fixed cost entity is kept, charge-free."""
+    mock_config_entry.add_to_hass(hass)
+    _set_cost_meters(
+        hass,
+        mock_config_entry,
+        {
+            "123": {
+                "mode": "sensor",
+                "entity_id": "sensor.price",
+                "fixed_cost_entity_id": "sensor.fixed_cost",
+            }
+        },
+    )
+    et = ZoneInfo("America/New_York")
+    t0 = datetime(2024, 1, 15, 10, 0, tzinfo=et)
+    t1 = t0 + timedelta(hours=1)
+    mock_api_with_meters.get_energy_usage.return_value = {
+        "data": {
+            t0: {"energy": 1.0, "temperature": 70},
+            t1: {"energy": 1.0, "temperature": 70},
+        },
+        "missing": [],
+    }
+    stats_store.seed(
+        "sensor.price", [{"start": t0, "mean": 0.10}, {"start": t1, "mean": 0.10}]
+    )
+    # The fixed cost entity only starts at t1; t0 predates it.
+    stats_store.seed("sensor.fixed_cost", [{"start": t1, "mean": 74.40}])
+
+    coordinator = DukeEnergyCoordinator(hass, mock_api_with_meters, mock_config_entry)
+    await coordinator.async_refresh()
+    await hass.async_block_till_done()
+
+    assert coordinator.last_update_success is True
+    cost_rows = stats_store.data["duke_energy:electric_123_energy_cost"]
+    # t0 survives at the rate alone (0.10); the fixed share only joins at t1.
+    assert len(cost_rows) == 2
+    assert [r["state"] for r in cost_rows] == pytest.approx([0.10, 0.20])
+
+
+async def test_fixed_cost_ignored_when_mode_off(
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+    mock_api_with_meters: AsyncMock,
+    stats_store: StatsStore,
+) -> None:
+    """An off meter records no cost even with a fixed cost configured."""
+    mock_config_entry.add_to_hass(hass)
+    _set_cost_meters(
+        hass, mock_config_entry, {"123": {"mode": "off", "fixed_monthly_cost": 74.40}}
+    )
+
+    coordinator = DukeEnergyCoordinator(hass, mock_api_with_meters, mock_config_entry)
+    await coordinator.async_refresh()
+    await hass.async_block_till_done()
+
+    assert coordinator.last_update_success is True
+    assert "duke_energy:electric_123_energy_cost" not in stats_store.data
