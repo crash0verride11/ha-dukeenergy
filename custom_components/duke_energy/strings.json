@@ -1,14 +1,5 @@
 {
   "config": {
-    "step": {
-      "pick_implementation": {
-        "title": "[%key:common::config_flow::title::oauth2_pick_implementation%]"
-      },
-      "reauth_confirm": {
-        "title": "[%key:common::config_flow::title::reauth%]",
-        "description": "The Duke Energy integration needs to re-authenticate your account"
-      }
-    },
     "abort": {
       "already_configured": "[%key:common::config_flow::abort::already_configured_account%]",
       "already_in_progress": "[%key:common::config_flow::abort::already_in_progress%]",
@@ -27,6 +18,15 @@
     },
     "create_entry": {
       "default": "[%key:common::config_flow::create_entry::authenticated%]"
+    },
+    "step": {
+      "pick_implementation": {
+        "title": "[%key:common::config_flow::title::oauth2_pick_implementation%]"
+      },
+      "reauth_confirm": {
+        "title": "[%key:common::config_flow::title::reauth%]",
+        "description": "The Duke Energy integration needs to re-authenticate your account"
+      }
     }
   },
   "options": {
@@ -43,7 +43,7 @@
       },
       "meter": {
         "title": "Cost source",
-        "description": "Set the cost source for {meter}.\n\n- Entity price: the rate in {unit} comes from a `sensor`, `number`, or `input_number`. A sensor with long-term statistics prices each interval at its rate at the time; a `number`/`input_number` has no history and prices flat at its current value.\n- Static price: a fixed rate in {unit}, changed only here.\n- Disabled: no cost tracking (existing cost statistics are kept).",
+        "description": "### Set the cost source for {meter}.\n\n- **Entity price:** the rate in {unit}. A `sensor` uses long-term statistics to price usage over its history; a `number`/`input_number` act as static price.\n- **Static price:** a fixed rate in {unit}.",
         "data": {
           "mode": "Cost source",
           "entity_id": "Price entity",
@@ -55,17 +55,17 @@
         }
       },
       "save": {
-        "title": "Save cost tracking",
+        "title": "Historical cost",
         "data": {
           "backfill_cost": "Backfill historical cost"
         },
         "data_description": {
-          "backfill_cost": "Enabling this reloads the integration and reprices all past usage for every configured meter (using the earliest/static price available). Leave it off for normal operation; it turns itself back off once the backfill completes."
+          "backfill_cost": "Enabling reloads the integration and reprices all past usage for every configured meter using the earliest available or static price. Leave off to price only new usage."
         }
       }
     },
     "error": {
-      "no_price_data": "The selected entity has neither long-term statistics nor a numeric current value, so it cannot price usage.",
+      "no_price_data": "The selected entity has no long-term statistics or a numeric current value.",
       "entity_required": "Select a price entity, or choose a different cost source.",
       "price_required": "Enter a static price, or choose a different cost source.",
       "invalid_price": "The static price must be a positive number."
