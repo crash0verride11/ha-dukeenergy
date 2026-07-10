@@ -1,5 +1,6 @@
 """Coordinator to handle Duke Energy connections."""
 
+import calendar
 import hashlib
 import logging
 from bisect import bisect_right
@@ -97,6 +98,26 @@ class _PriceMap:
         if index < 0:
             return None
         return self.prices[index]
+
+
+def _interval_fixed_cost(
+    start: datetime, interval: str, fixed_monthly_cost: float
+) -> float:
+    """
+    Return one interval's share of a meter's fixed monthly cost.
+
+    The cost is spread evenly across the calendar month containing ``start``,
+    so the denominator is interval-aware: hours for electric, days for gas. A
+    month whose intervals are not all present (a Duke usage gap, or the hour
+    lost to a spring-forward) therefore under-counts its share slightly; that
+    is accepted rather than corrected at the month boundary.
+    """
+    if not fixed_monthly_cost:
+        return 0.0
+    days_in_month = calendar.monthrange(start.year, start.month)[1]
+    if interval == "DAILY":
+        return fixed_monthly_cost / days_in_month
+    return fixed_monthly_cost / (days_in_month * 24)
 
 
 class DukeEnergyCoordinator(DataUpdateCoordinator[None]):
@@ -466,10 +487,21 @@ class DukeEnergyCoordinator(DataUpdateCoordinator[None]):
         if mode == "static" and static_price is None:
             return
 
+        # The mode selects the source of the fixed cost too: an entity alongside
+        # an entity price, a static amount alongside a static price.
+        fixed_cost_entity_id = (
+            cost_config.get("fixed_cost_entity_id") if mode == "sensor" else None
+        )
+        fixed_monthly_cost = (
+            cost_config.get("fixed_monthly_cost") if mode == "static" else None
+        )
+
         if do_backfill:
             await self._async_backfill_cost(
                 entity_id=entity_id,
                 static_price=static_price,
+                fixed_cost_entity_id=fixed_cost_entity_id,
+                fixed_monthly_cost=fixed_monthly_cost,
                 id_prefix=id_prefix,
                 name_prefix=name_prefix,
                 interval=interval,
@@ -478,6 +510,8 @@ class DukeEnergyCoordinator(DataUpdateCoordinator[None]):
             await self._async_add_cost_statistics(
                 entity_id=entity_id,
                 static_price=static_price,
+                fixed_cost_entity_id=fixed_cost_entity_id,
+                fixed_monthly_cost=fixed_monthly_cost,
                 id_prefix=id_prefix,
                 name_prefix=name_prefix,
                 usage=usage,
@@ -489,6 +523,8 @@ class DukeEnergyCoordinator(DataUpdateCoordinator[None]):
         *,
         entity_id: str | None,
         static_price: float | None,
+        fixed_cost_entity_id: str | None,
+        fixed_monthly_cost: float | None,
         id_prefix: str,
         name_prefix: str,
         usage: dict[datetime, dict[str, float | int]],
@@ -562,6 +598,15 @@ class DukeEnergyCoordinator(DataUpdateCoordinator[None]):
             starting_sum = 0.0
             last_cost_time = None
 
+        fixed_cost_map, pre_history_fixed_cost = await self._async_resolve_fixed_cost(
+            fixed_cost_entity_id=fixed_cost_entity_id,
+            fixed_monthly_cost=fixed_monthly_cost,
+            start=usage_keys[0],
+            end=usage_keys[-1],
+            interval=interval,
+            backward_fill=False,
+        )
+
         samples = (
             (start, self._stat_start(start, interval), usage[start]["energy"])
             for start in usage_keys
@@ -573,6 +618,9 @@ class DukeEnergyCoordinator(DataUpdateCoordinator[None]):
             samples=samples,
             price_map=price_map,
             pre_history_price=pre_history_price,
+            fixed_cost_map=fixed_cost_map,
+            pre_history_fixed_cost=pre_history_fixed_cost,
+            interval=interval,
             starting_sum=starting_sum,
             log_verb="Adding",
         )
@@ -585,6 +633,9 @@ class DukeEnergyCoordinator(DataUpdateCoordinator[None]):
         samples: Iterable[tuple[datetime, datetime, float]],
         price_map: _PriceMap,
         pre_history_price: float | None,
+        fixed_cost_map: _PriceMap,
+        pre_history_fixed_cost: float | None,
+        interval: str,
         starting_sum: float,
         log_verb: str,
     ) -> None:
@@ -593,7 +644,11 @@ class DukeEnergyCoordinator(DataUpdateCoordinator[None]):
 
         ``price_map.price_at`` supplies the carried-forward price; an interval
         with no prior price falls back to ``pre_history_price`` (None skips it).
-        The running sum accumulates from ``starting_sum``.
+        The fixed monthly cost resolves the same way against ``fixed_cost_map``,
+        but only ever rides along on an interval the price already admitted: an
+        unresolved fixed cost contributes 0.0 rather than skipping the interval,
+        so configuring one can never delete a row the price alone would have
+        produced. The running sum accumulates from ``starting_sum``.
         """
         cost_sum = starting_sum
         cost_statistics: list[StatisticData] = []
@@ -603,7 +658,12 @@ class DukeEnergyCoordinator(DataUpdateCoordinator[None]):
                 price = pre_history_price
             if price is None:
                 continue
-            cost = energy * price
+            fixed_monthly_cost = fixed_cost_map.price_at(lookup_dt)
+            if fixed_monthly_cost is None:
+                fixed_monthly_cost = pre_history_fixed_cost
+            cost = energy * price + _interval_fixed_cost(
+                lookup_dt, interval, fixed_monthly_cost or 0.0
+            )
             cost_sum += cost
             cost_statistics.append(
                 StatisticData(start=stat_start, state=cost, sum=cost_sum)
@@ -632,11 +692,13 @@ class DukeEnergyCoordinator(DataUpdateCoordinator[None]):
             unit_of_measurement=self.hass.config.currency or "USD",
         )
 
-    async def _async_backfill_cost(
+    async def _async_backfill_cost(  # noqa: PLR0913
         self,
         *,
         entity_id: str | None,
         static_price: float | None,
+        fixed_cost_entity_id: str | None,
+        fixed_monthly_cost: float | None,
         id_prefix: str,
         name_prefix: str,
         interval: str,
@@ -711,6 +773,15 @@ class DukeEnergyCoordinator(DataUpdateCoordinator[None]):
                     )
                     return
 
+        fixed_cost_map, pre_history_fixed_cost = await self._async_resolve_fixed_cost(
+            fixed_cost_entity_id=fixed_cost_entity_id,
+            fixed_monthly_cost=fixed_monthly_cost,
+            start=dt_util.utc_from_timestamp(rows[0]["start"]),
+            end=dt_util.utc_from_timestamp(rows[-1]["start"]),
+            interval=interval,
+            backward_fill=True,
+        )
+
         tz = await dt_util.async_get_time_zone(_DUKE_TZ)
         # An ET datetime satisfies both _PriceMap key derivations:
         # .timestamp() is tz-independent and .date() needs Eastern. The stored
@@ -730,9 +801,56 @@ class DukeEnergyCoordinator(DataUpdateCoordinator[None]):
             samples=samples,
             price_map=price_map,
             pre_history_price=earliest_price,
+            fixed_cost_map=fixed_cost_map,
+            pre_history_fixed_cost=pre_history_fixed_cost,
+            interval=interval,
             starting_sum=0.0,
             log_verb="Backfilling",
         )
+
+    async def _async_resolve_fixed_cost(  # noqa: PLR0913
+        self,
+        *,
+        fixed_cost_entity_id: str | None,
+        fixed_monthly_cost: float | None,
+        start: datetime,
+        end: datetime,
+        interval: str,
+        backward_fill: bool,
+    ) -> tuple[_PriceMap, float | None]:
+        """
+        Resolve the fixed monthly cost into a (map, fallback) pair.
+
+        Mirrors the price resolution: a static amount is a flat fallback over an
+        empty map; an entity's long-term statistics carry the last known value
+        forward across gaps, and an entity with no statistics at all
+        (``number``/``input_number``, or a stateless sensor) applies flat at its
+        current state. ``backward_fill`` reaches back to the earliest known
+        value for pre-history intervals, as the full-history backfill does for
+        price; the incremental path instead leaves the head at 0.0.
+        """
+        empty = _PriceMap(interval, [], [])
+        if fixed_monthly_cost is not None:
+            return empty, fixed_monthly_cost
+        if fixed_cost_entity_id is None:
+            return empty, 0.0
+
+        fixed_cost_map = await self._async_get_price_map(
+            fixed_cost_entity_id, start, end, interval
+        )
+        if not fixed_cost_map:
+            current = self._get_current_price(fixed_cost_entity_id)
+            if current is None:
+                # Unlike a dead price sensor this is not fatal: cost still
+                # records at the per-unit rate, just without the fixed cost.
+                _LOGGER.warning(
+                    "Fixed cost entity %s has no statistics in the usage "
+                    "window and no numeric state; recording cost without it",
+                    fixed_cost_entity_id,
+                )
+            return empty, current or 0.0
+
+        return fixed_cost_map, (fixed_cost_map.earliest if backward_fill else 0.0)
 
     def _get_current_price(self, entity_id: str) -> float | None:
         """

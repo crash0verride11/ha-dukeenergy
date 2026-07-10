@@ -47,11 +47,15 @@
                 "data": {
                     "mode": "Cost source",
                     "entity_id": "Price entity",
-                    "price": "Static price"
+                    "price": "Static price",
+                    "fixed_cost_entity_id": "Fixed monthly cost entity",
+                    "fixed_monthly_cost": "Fixed monthly cost"
                 },
                 "data_description": {
                     "entity_id": "Pick a sensor, number, or input_number holding the rate in {unit}.",
-                    "price": "Used when the cost source is Static. Enter the rate in {unit}."
+                    "price": "Used when the cost source is Static. Enter the rate in {unit}.",
+                    "fixed_cost_entity_id": "Optional. An entity holding the recurring monthly charge from your bill (basic customer or service charge). Spread evenly across each month's intervals and added on top of the per-unit rate.",
+                    "fixed_monthly_cost": "Optional. The recurring monthly charge from your bill (basic customer or service charge). Spread evenly across each month's intervals and added on top of the per-unit rate. Leave blank or zero for none."
                 }
             },
             "save": {
@@ -60,7 +64,7 @@
                     "backfill_cost": "Backfill historical cost"
                 },
                 "data_description": {
-                    "backfill_cost": "Enabling this reloads the integration and reprices all past usage for every configured meter (using the earliest/static price available). Leave it off for normal operation; it turns itself back off once the backfill completes."
+                    "backfill_cost": "Enabling this reloads the integration and reprices all past usage for every configured meter (using the earliest/static price available). Any fixed monthly cost is applied to that history too, at its current value. Leave it off for normal operation; it turns itself back off once the backfill completes."
                 }
             }
         },
@@ -68,7 +72,8 @@
             "no_price_data": "The selected entity has neither long-term statistics nor a numeric current value, so it cannot price usage.",
             "entity_required": "Select a price entity, or choose a different cost source.",
             "price_required": "Enter a static price, or choose a different cost source.",
-            "invalid_price": "The static price must be a positive number."
+            "invalid_price": "The static price must be a positive number.",
+            "no_fixed_cost_data": "The selected fixed cost entity has neither long-term statistics nor a numeric current value."
         },
         "abort": {
             "no_meters": "No supported electric or gas meters were found for this account."

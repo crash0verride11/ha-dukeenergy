@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import jwt
 import voluptuous as vol
@@ -180,14 +180,64 @@ class DukeEnergyOptionsFlow(OptionsFlow):
         service = str(meter["serviceType"]).capitalize()
         config = self._cost_meters.get(serial, {})
         mode = config.get("mode", "off")
+        fixed: str | None = None
         if mode == "sensor":
             detail = config.get("entity_id", "?")
+            fixed = config.get("fixed_cost_entity_id")
         elif mode == "static":
             unit = _EXPECTED_UNIT.get(meter["serviceType"], "")
             detail = f"{config.get('price')} {unit}".strip()
+            if config.get("fixed_monthly_cost"):
+                fixed = f"{config['fixed_monthly_cost']}/month"
         else:
             detail = "Off"
+        if fixed:
+            detail = f"{detail} + {fixed}"
         return f"{service} meter {serial}: {detail}"
+
+    async def _validate_meter_input(  # noqa: PLR0911
+        self, user_input: dict[str, Any]
+    ) -> tuple[dict[str, Any] | None, str | None]:
+        """
+        Validate one meter's submitted cost source.
+
+        Returns the config to store, or None plus a translation key for the
+        error to show. The mode picks both the per-unit rate and the fixed
+        monthly cost from the same source, so the two never mix. A blank or
+        zero fixed cost stores no key at all, leaving the meter priced exactly
+        as it was before fixed costs existed.
+        """
+        mode = user_input["mode"]
+        if mode == "sensor":
+            entity_id = user_input.get("entity_id")
+            fixed_cost_entity_id = user_input.get("fixed_cost_entity_id")
+            if not entity_id:
+                return None, "entity_required"
+            if not await self._entity_usable_for_price(entity_id):
+                return None, "no_price_data"
+            if fixed_cost_entity_id and not await self._entity_usable_for_price(
+                fixed_cost_entity_id
+            ):
+                return None, "no_fixed_cost_data"
+            config: dict[str, Any] = {"mode": "sensor", "entity_id": entity_id}
+            if fixed_cost_entity_id:
+                config["fixed_cost_entity_id"] = fixed_cost_entity_id
+            return config, None
+
+        if mode == "static":
+            price = user_input.get("price")
+            fixed_monthly_cost = user_input.get("fixed_monthly_cost")
+            if price is None:
+                return None, "price_required"
+            if price <= 0:
+                return None, "invalid_price"
+            # Negatives are already rejected by the selector's min=0.
+            config = {"mode": "static", "price": price}
+            if fixed_monthly_cost:
+                config["fixed_monthly_cost"] = fixed_monthly_cost
+            return config, None
+
+        return {"mode": "off"}, None
 
     async def async_step_meter(
         self, user_input: dict[str, Any] | None = None
@@ -199,35 +249,16 @@ class DukeEnergyOptionsFlow(OptionsFlow):
         errors: dict[str, str] = {}
 
         if user_input is not None:
-            mode = user_input["mode"]
-            entity_id = user_input.get("entity_id")
-            price = user_input.get("price")
-            if mode == "sensor":
-                if not entity_id:
-                    errors["base"] = "entity_required"
-                elif not await self._entity_usable_for_price(entity_id):
-                    errors["base"] = "no_price_data"
-                else:
-                    self._cost_meters[serial] = {
-                        "mode": "sensor",
-                        "entity_id": entity_id,
-                    }
-                    return await self.async_step_init()
-            elif mode == "static":
-                if price is None:
-                    errors["base"] = "price_required"
-                elif price <= 0:
-                    errors["base"] = "invalid_price"
-                else:
-                    self._cost_meters[serial] = {"mode": "static", "price": price}
-                    return await self.async_step_init()
-            else:
-                self._cost_meters[serial] = {"mode": "off"}
+            config, error = await self._validate_meter_input(user_input)
+            if config is not None:
+                self._cost_meters[serial] = config
                 return await self.async_step_init()
+            errors["base"] = cast("str", error)
 
         defaults = (
             user_input if user_input is not None else self._cost_meters.get(serial, {})
         )
+        currency = self.hass.config.currency or "USD"
         schema = vol.Schema(
             {
                 vol.Required(
@@ -254,6 +285,25 @@ class DukeEnergyOptionsFlow(OptionsFlow):
                         step="any",
                         mode=NumberSelectorMode.BOX,
                         unit_of_measurement=_EXPECTED_UNIT.get(service_type, ""),
+                    )
+                ),
+                vol.Optional(
+                    "fixed_cost_entity_id",
+                    description={
+                        "suggested_value": defaults.get("fixed_cost_entity_id")
+                    },
+                ): EntitySelector(
+                    EntitySelectorConfig(domain=["sensor", "input_number", "number"])
+                ),
+                vol.Optional(
+                    "fixed_monthly_cost",
+                    description={"suggested_value": defaults.get("fixed_monthly_cost")},
+                ): NumberSelector(
+                    NumberSelectorConfig(
+                        min=0,
+                        step="any",
+                        mode=NumberSelectorMode.BOX,
+                        unit_of_measurement=f"{currency}/month",
                     )
                 ),
             }
