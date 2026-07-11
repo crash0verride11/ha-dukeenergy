@@ -121,6 +121,13 @@ class DukeEnergyCoordinator(DataUpdateCoordinator[None]):
         self.api = api
         self._statistic_ids: set = set()
         self._last_successful_date: date | None = None
+        # Diagnostic sensor sources (see sensor.py):
+        # when the last poll attempt ran (success or not), when each meter
+        # last had consumption statistics written, and each supported
+        # meter's service type (for device creation at platform setup).
+        self.last_poll_time: datetime | None = None
+        self.meter_last_updated: dict[str, datetime] = {}
+        self.meter_info: dict[str, str] = {}
         self._unsub_scheduled: Callable[[], None] | None = None
         self._daily_offset: timedelta | None = None
         self._offset_date: date | None = None
@@ -234,6 +241,7 @@ class DukeEnergyCoordinator(DataUpdateCoordinator[None]):
                     )
                     continue
 
+                self.meter_info[serial_number] = meter["serviceType"]
                 id_prefix = f"{meter['serviceType'].lower()}_{serial_number}"
                 consumption_statistic_id = f"{DOMAIN}:{id_prefix}_energy_consumption"
                 self._statistic_ids.add(consumption_statistic_id)
@@ -325,6 +333,10 @@ class DukeEnergyCoordinator(DataUpdateCoordinator[None]):
                 async_add_external_statistics(
                     self.hass, consumption_metadata, consumption_statistics
                 )
+                if consumption_statistics:
+                    # New consumption rows landed: the meter's data changed.
+                    # Cost/temperature are derived, so they don't count.
+                    self.meter_last_updated[serial_number] = dt_util.utcnow()
 
                 # Cost statistic (per-meter mode: sensor / static / off)
                 cost_config = cost_meters.get(serial_number)
@@ -417,6 +429,7 @@ class DukeEnergyCoordinator(DataUpdateCoordinator[None]):
                 self._last_successful_date = today
 
         finally:
+            self.last_poll_time = dt_util.utcnow()
             had_success = self._last_successful_date == today
             if had_success:
                 _LOGGER.debug("Duke Energy data retrieval successful")

@@ -74,6 +74,16 @@
       "no_meters": "No supported electric or gas meters were found for this account."
     }
   },
+  "entity": {
+    "sensor": {
+      "last_duke_poll": {
+        "name": "Last updated"
+      },
+      "last_meter_change": {
+        "name": "Last changed"
+      }
+    }
+  },
   "selector": {
     "cost_mode": {
       "options": {

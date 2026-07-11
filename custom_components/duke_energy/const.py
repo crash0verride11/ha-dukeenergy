@@ -1,6 +1,10 @@
 """Constants for the Duke Energy integration."""
 
+from homeassistant.const import Platform
+
 DOMAIN = "duke_energy"
+
+PLATFORMS = [Platform.SENSOR]
 
 # Auth0 OAuth2 configuration for Duke Energy
 OAUTH2_AUTHORIZE = "https://login.duke-energy.com/authorize"

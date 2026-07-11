@@ -14,7 +14,7 @@ from homeassistant.helpers import aiohttp_client, config_entry_oauth2_flow
 
 from .aiodukeenergy import DukeEnergy
 from .api import DukeEnergyAuth
-from .const import DOMAIN
+from .const import DOMAIN, PLATFORMS
 from .coordinator import DukeEnergyConfigEntry, DukeEnergyCoordinator
 from .oauth import DukeEnergyOAuth2Implementation
 
@@ -57,6 +57,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: DukeEnergyConfigEntry) -
     await coordinator.async_config_entry_first_refresh()
     entry.runtime_data = coordinator
 
+    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+
     return True
 
 
@@ -71,11 +73,9 @@ async def async_migrate_entry(
     return True
 
 
-async def async_unload_entry(
-    _hass: HomeAssistant, _entry: DukeEnergyConfigEntry
-) -> bool:
+async def async_unload_entry(hass: HomeAssistant, entry: DukeEnergyConfigEntry) -> bool:
     """Unload a config entry."""
-    return True
+    return await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
 
 
 async def async_remove_entry(
@@ -90,9 +90,7 @@ async def async_remove_entry(
     instance = get_instance(hass)
     all_stats = await instance.async_add_executor_job(list_statistic_ids, hass)
     stat_ids = [
-        stat["statistic_id"]
-        for stat in all_stats
-        if stat.get("source") == DOMAIN
+        stat["statistic_id"] for stat in all_stats if stat.get("source") == DOMAIN
     ]
     if stat_ids:
         instance.async_clear_statistics(stat_ids)
