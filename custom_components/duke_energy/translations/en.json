@@ -28,5 +28,59 @@
                 "title": "Authentication expired for {name}"
             }
         }
+    },
+    "options": {
+        "step": {
+            "init": {
+                "title": "Cost tracking",
+                "description": "Configure how energy cost is recorded alongside usage. Pick a meter to set its cost source, then choose Save to apply.",
+                "data": {
+                    "meter": "Meter"
+                },
+                "data_description": {
+                    "meter": "Choose a meter to configure, or Save and apply to finish."
+                }
+            },
+            "meter": {
+                "title": "Cost source",
+                "description": "### Set the cost source for {meter}.\n\n- **Entity price:** the rate in {unit}. A `sensor` uses long-term statistics to price usage over its history; a `number`/`input_number` act as static price.\n- **Static price:** a fixed rate in {unit}.",
+                "data": {
+                    "mode": "Cost source",
+                    "entity_id": "Price entity",
+                    "price": "Static price"
+                },
+                "data_description": {
+                    "entity_id": "Pick a sensor, number, or input_number holding the rate in {unit}.",
+                    "price": "Used when the cost source is Static. Enter the rate in {unit}."
+                }
+            },
+            "save": {
+                "title": "Historical cost",
+                "data": {
+                    "backfill_cost": "Backfill historical cost"
+                },
+                "data_description": {
+                    "backfill_cost": "Enabling reloads the integration and reprices all past usage for every configured meter using the earliest available or static price. Leave off to price only new usage."
+                }
+            }
+        },
+        "error": {
+            "no_price_data": "The selected entity has no long-term statistics or a numeric current value.",
+            "entity_required": "Select a price entity, or choose a different cost source.",
+            "price_required": "Enter a static price, or choose a different cost source.",
+            "invalid_price": "The static price must be a positive number."
+        },
+        "abort": {
+            "no_meters": "No supported electric or gas meters were found for this account."
+        }
+    },
+    "selector": {
+        "cost_mode": {
+            "options": {
+                "off": "Do not track price",
+                "sensor": "Use an entity tracking current price",
+                "static": "Use a static current price"
+            }
+        }
     }
 }
