@@ -8,6 +8,7 @@ This is a fork of [hunterjm](https://github.com/hunterjm/ha-dukeenergy)'s work w
 - Average temperature readings — 1 per duke account, as meters at the same location have the same temperature reading.
 - Polling timing improvements — up to three semi-random polls over a narrower window, see FAQ
 - Cost statistics — configure a price and the integration calculates a running total
+- Diagnostic entities - when the integration last polled and when each meter last changed
 
 ## Why?
 
@@ -65,11 +66,11 @@ For external statistics, such as those the integration makes, home assistant onl
 
 The integration downloads three years of data from duke and home assistant needs time to calculate statistics based on your data. Wait a while and try again.
 
-### I don't see any entities
+### I don't see any usage or cost entities?
 
-Only external statistics are created. Since we only know historical data, we can never have a known current state.
+Only external statistics are created. Since we only know historical data, these could never have a known current state.
 
-### When is new data retreived?
+### When is new data retrieved?
 
 #### 09:00, 14:00, and 19:00
 * +/- a random interval up to 2 hours
