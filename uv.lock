@@ -100,8 +100,8 @@ wheels = [
 ]
 
 [[package]]
-name = "aiodukeenergy"
-version = "1.1.0"
+name = "aiodukeenergy-co"
+version = "1.0.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "aiohttp", version = "3.11.16", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.13.2'" },
@@ -112,9 +112,9 @@ dependencies = [
     { name = "yarl", version = "1.22.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.13.2' and python_full_version < '3.14.2'" },
     { name = "yarl", version = "1.23.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.14.2'" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/e1/f7/610b7e0d919c68f15c10a96af703ebf7fe65d766e417a9bc1bd684077559/aiodukeenergy-1.1.0.tar.gz", hash = "sha256:9eb06625119b1c9ea0ecb4401996bb82ec945da5329e3dd092ce138e98528989", size = 15505, upload-time = "2026-03-02T17:43:13.365Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/1a/05/744eed4ab184a34c8aed96790e4f390fb180ae7e7c1ca0b5f7bf30c8a4c2/aiodukeenergy_co-1.0.0.tar.gz", hash = "sha256:75736217184e2edd3e07aed50dd6b74e1f23215a40110bb5470bd9536613ab94", size = 16077, upload-time = "2026-07-12T03:37:22.21Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/36/46/d60af1f48aee58b728da4a1fd395857b5e11f52cf4e00090d9f688ad93da/aiodukeenergy-1.1.0-py3-none-any.whl", hash = "sha256:598f19cdbd156f906c77e39e78d9f6f04fc9fd9c9337a74d5250d8524786ca26", size = 15812, upload-time = "2026-03-02T17:43:11.958Z" },
+    { url = "https://files.pythonhosted.org/packages/b4/da/463fe02576c27d39df3544edc99c8749a53d01d813c7aa0c27b8f1e3d24d/aiodukeenergy_co-1.0.0-py3-none-any.whl", hash = "sha256:4445e2b4f27bd0d7ec8ab4f4b8d708617ec2a02c04265ff4e13fdb1b9815154e", size = 16126, upload-time = "2026-07-12T03:37:20.893Z" },
 ]
 
 [[package]]
@@ -1737,7 +1737,7 @@ source = { virtual = "." }
 
 [package.dev-dependencies]
 dev = [
-    { name = "aiodukeenergy" },
+    { name = "aiodukeenergy-co" },
     { name = "freezegun", version = "1.5.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.13.2'" },
     { name = "freezegun", version = "1.5.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.13.2'" },
     { name = "pyjwt" },
@@ -1754,7 +1754,7 @@ dev = [
 
 [package.metadata.requires-dev]
 dev = [
-    { name = "aiodukeenergy", specifier = "==1.1.0" },
+    { name = "aiodukeenergy-co", specifier = "==1.0.0" },
     { name = "freezegun", specifier = ">=1.5" },
     { name = "pyjwt", specifier = ">=2.8" },
     { name = "pytest", specifier = ">=8.3" },

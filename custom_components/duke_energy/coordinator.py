@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, tzinfo
 from typing import Any, cast
 
+from aiodukeenergy_co import DukeEnergy, DukeEnergyAuthError
 from aiohttp import ClientError
 from homeassistant.components.recorder import (
     get_instance,  # pyright: ignore[reportPrivateImportUsage]
@@ -37,7 +38,6 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from homeassistant.util import dt as dt_util
 from homeassistant.util.unit_conversion import EnergyConverter
 
-from .aiodukeenergy import DukeEnergy, DukeEnergyAuthError
 from .const import DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
