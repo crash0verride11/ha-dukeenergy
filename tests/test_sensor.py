@@ -1,10 +1,12 @@
-"""Tests for the Duke Energy diagnostic sensors."""
+"""Tests for the Duke Energy sensors."""
 
 from __future__ import annotations
 
+from datetime import datetime
 from unittest.mock import AsyncMock
 
-from homeassistant.const import STATE_UNKNOWN
+from aiohttp import ClientError
+from homeassistant.const import STATE_UNKNOWN, UnitOfEnergy, UnitOfVolume
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
@@ -23,23 +25,28 @@ async def _setup_entry(hass: HomeAssistant, entry: MockConfigEntry) -> None:
     await hass.async_block_till_done()
 
 
-def _entity_ids(
-    hass: HomeAssistant, entry: MockConfigEntry, serial: str
-) -> tuple[str, str]:
-    """Return (last_duke_poll, last_meter_change) entity ids for a meter."""
-    registry = er.async_get(hass)
-    poll = registry.async_get_entity_id(
-        "sensor", DOMAIN, f"{entry.entry_id}_{serial}_last_duke_poll"
-    )
-    change = registry.async_get_entity_id(
-        "sensor", DOMAIN, f"{entry.entry_id}_{serial}_last_meter_change"
-    )
-    assert poll is not None
-    assert change is not None
-    return poll, change
+def _eid(hass: HomeAssistant, unique_id: str) -> str:
+    """Resolve a unique_id to its entity_id."""
+    entity_id = er.async_get(hass).async_get_entity_id("sensor", DOMAIN, unique_id)
+    assert entity_id is not None
+    return entity_id
 
 
-async def test_sensors_created_with_values(
+def _meter_eid(
+    hass: HomeAssistant, entry: MockConfigEntry, serial: str, key: str
+) -> str:
+    """Resolve a meter sensor's entity_id."""
+    return _eid(hass, f"{entry.entry_id}_{serial}_{key}")
+
+
+def _account_eid(
+    hass: HomeAssistant, entry: MockConfigEntry, src_acct_id: str, key: str
+) -> str:
+    """Resolve an account sensor's entity_id."""
+    return _eid(hass, f"{entry.entry_id}_account_{src_acct_id}_{key}")
+
+
+async def test_devices_and_diagnostic_sensors(
     recorder_mock: object,
     hass: HomeAssistant,
     mock_config_entry: MockConfigEntry,
@@ -47,31 +54,161 @@ async def test_sensors_created_with_values(
     stats_store: StatsStore,
     auto_enable_custom_integrations: None,
 ) -> None:
-    """Both diagnostic sensors exist per meter and hold timestamps after setup."""
+    """Account device owns Last updated; meter device (via account) owns Last changed."""
     mock_config_entry.add_to_hass(hass)
     await _setup_entry(hass, mock_config_entry)
 
-    poll_id, change_id = _entity_ids(hass, mock_config_entry, "123")
-
-    # Both are diagnostic entities on the meter's device.
     registry = er.async_get(hass)
     device_registry = dr.async_get(hass)
-    device = device_registry.async_get_device(identifiers={(DOMAIN, "123")})
-    assert device is not None
-    assert device.manufacturer == "Duke Energy"
-    for entity_id in (poll_id, change_id):
-        reg_entry = registry.async_get(entity_id)
-        assert reg_entry is not None
-        assert reg_entry.entity_category is EntityCategory.DIAGNOSTIC
-        assert reg_entry.device_id == device.id
+    account_device = device_registry.async_get_device(
+        identifiers={(DOMAIN, "account_src-1")}
+    )
+    meter_device = device_registry.async_get_device(identifiers={(DOMAIN, "123")})
+    assert account_device is not None
+    assert account_device.name == "Duke Energy Account acct-1"
+    assert meter_device is not None
+    assert meter_device.via_device_id == account_device.id
+
+    poll_id = _account_eid(hass, mock_config_entry, "src-1", "last_duke_poll")
+    change_id = _meter_eid(hass, mock_config_entry, "123", "last_meter_change")
+    poll_entry = registry.async_get(poll_id)
+    change_entry = registry.async_get(change_id)
+    assert poll_entry.device_id == account_device.id
+    assert poll_entry.entity_category is EntityCategory.DIAGNOSTIC
+    assert change_entry.device_id == meter_device.id
+    assert change_entry.entity_category is EntityCategory.DIAGNOSTIC
 
     # The first refresh polled and wrote statistics, so both have timestamps.
-    poll_state = hass.states.get(poll_id)
-    change_state = hass.states.get(change_id)
-    assert poll_state is not None
-    assert change_state is not None
-    assert dt_util.parse_datetime(poll_state.state) is not None
-    assert dt_util.parse_datetime(change_state.state) is not None
+    assert dt_util.parse_datetime(hass.states.get(poll_id).state) is not None
+    assert dt_util.parse_datetime(hass.states.get(change_id).state) is not None
+
+
+async def test_summary_sensor_values(
+    recorder_mock: object,
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+    mock_api_with_meters: AsyncMock,
+    stats_store: StatsStore,
+    auto_enable_custom_integrations: None,
+) -> None:
+    """Usage sensors carry the meter totals; cost sensors the account bills."""
+    mock_config_entry.add_to_hass(hass)
+    await _setup_entry(hass, mock_config_entry)
+
+    # The cycle start comes from the newest invoice's billEndDate + 1 day.
+    assert mock_api_with_meters.get_monthly_usage.await_count == 1
+    assert mock_api_with_meters.get_monthly_usage.await_args.kwargs[
+        "start_date"
+    ] == datetime(2026, 6, 16)
+
+    for key, expected in (
+        ("usage_this_bill_cycle", "40.0"),
+        ("usage_last_bill_cycle", "900.0"),
+        ("usage_last_year", "1500.0"),
+    ):
+        state = hass.states.get(_meter_eid(hass, mock_config_entry, "123", key))
+        assert state.state == expected
+        assert state.attributes["unit_of_measurement"] == UnitOfEnergy.KILO_WATT_HOUR
+
+    for key, expected in (
+        ("cost_last_bill_cycle", "185.5"),
+        ("cost_last_year", "310.0"),
+    ):
+        state = hass.states.get(_account_eid(hass, mock_config_entry, "src-1", key))
+        assert state.state == expected
+        assert state.attributes["device_class"] == "monetary"
+
+
+async def test_gas_usage_sensor_units(
+    recorder_mock: object,
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+    mock_api_with_gas_meter: AsyncMock,
+    stats_store: StatsStore,
+    auto_enable_custom_integrations: None,
+) -> None:
+    """Gas meters report bill-cycle usage in CCF with the gas device class."""
+    mock_config_entry.add_to_hass(hass)
+    await _setup_entry(hass, mock_config_entry)
+
+    state = hass.states.get(
+        _meter_eid(hass, mock_config_entry, "456", "usage_this_bill_cycle")
+    )
+    assert state.state == "40.0"
+    assert state.attributes["unit_of_measurement"] == UnitOfVolume.CENTUM_CUBIC_FEET
+    assert state.attributes["device_class"] == "gas"
+
+
+async def test_invoices_fetched_once_per_account(
+    recorder_mock: object,
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+    mock_api_with_meters: AsyncMock,
+    stats_store: StatsStore,
+    auto_enable_custom_integrations: None,
+) -> None:
+    """Two meters on one account share a single invoice lookup and cycle start."""
+    electric = mock_api_with_meters.get_meters.return_value["123"]
+    mock_api_with_meters.get_meters.return_value["456"] = {
+        "serialNum": "456",
+        "serviceType": "GAS",
+        "agreementActiveDate": "2000-01-01",
+        "account": electric["account"],
+    }
+    mock_config_entry.add_to_hass(hass)
+    await _setup_entry(hass, mock_config_entry)
+
+    assert mock_api_with_meters.get_invoices.await_count == 1
+    assert mock_api_with_meters.get_invoices.await_args.args == ("acct-1",)
+    assert mock_api_with_meters.get_monthly_usage.await_count == 2
+    start_dates = {
+        call.kwargs["start_date"]
+        for call in mock_api_with_meters.get_monthly_usage.await_args_list
+    }
+    assert start_dates == {datetime(2026, 6, 16)}
+
+
+async def test_invoice_failure_falls_back_to_default_window(
+    recorder_mock: object,
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+    mock_api_with_meters: AsyncMock,
+    stats_store: StatsStore,
+    auto_enable_custom_integrations: None,
+) -> None:
+    """A failing invoice lookup still fetches the summary, with no start date."""
+    mock_api_with_meters.get_invoices.side_effect = ClientError
+    mock_config_entry.add_to_hass(hass)
+    await _setup_entry(hass, mock_config_entry)
+
+    assert (
+        mock_api_with_meters.get_monthly_usage.await_args.kwargs["start_date"] is None
+    )
+    usage_id = _meter_eid(hass, mock_config_entry, "123", "usage_this_bill_cycle")
+    assert hass.states.get(usage_id).state == "40.0"
+
+
+async def test_summary_failure_keeps_poll_working(
+    recorder_mock: object,
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+    mock_api_with_meters: AsyncMock,
+    stats_store: StatsStore,
+    auto_enable_custom_integrations: None,
+) -> None:
+    """A failing summary endpoint leaves usage/cost unknown but stats still ingest."""
+    mock_api_with_meters.get_monthly_usage.side_effect = ClientError
+    mock_config_entry.add_to_hass(hass)
+    await _setup_entry(hass, mock_config_entry)
+
+    coordinator = mock_config_entry.runtime_data
+    assert coordinator.last_update_success is True
+    assert "duke_energy:electric_123_energy_consumption" in stats_store.data
+
+    usage_id = _meter_eid(hass, mock_config_entry, "123", "usage_this_bill_cycle")
+    cost_id = _account_eid(hass, mock_config_entry, "src-1", "cost_last_bill_cycle")
+    assert hass.states.get(usage_id).state == STATE_UNKNOWN
+    assert hass.states.get(cost_id).state == STATE_UNKNOWN
 
 
 async def test_last_meter_change_unknown_without_new_data(
@@ -87,15 +224,11 @@ async def test_last_meter_change_unknown_without_new_data(
     mock_config_entry.add_to_hass(hass)
     await _setup_entry(hass, mock_config_entry)
 
-    poll_id, change_id = _entity_ids(hass, mock_config_entry, "123")
+    poll_id = _account_eid(hass, mock_config_entry, "src-1", "last_duke_poll")
+    change_id = _meter_eid(hass, mock_config_entry, "123", "last_meter_change")
 
-    poll_state = hass.states.get(poll_id)
-    assert poll_state is not None
-    assert dt_util.parse_datetime(poll_state.state) is not None
-
-    change_state = hass.states.get(change_id)
-    assert change_state is not None
-    assert change_state.state == STATE_UNKNOWN
+    assert dt_util.parse_datetime(hass.states.get(poll_id).state) is not None
+    assert hass.states.get(change_id).state == STATE_UNKNOWN
 
 
 async def test_last_meter_change_restored_across_reload(
@@ -110,7 +243,8 @@ async def test_last_meter_change_restored_across_reload(
     mock_config_entry.add_to_hass(hass)
     await _setup_entry(hass, mock_config_entry)
 
-    poll_id, change_id = _entity_ids(hass, mock_config_entry, "123")
+    poll_id = _account_eid(hass, mock_config_entry, "src-1", "last_duke_poll")
+    change_id = _meter_eid(hass, mock_config_entry, "123", "last_meter_change")
     original_change = hass.states.get(change_id).state
     assert dt_util.parse_datetime(original_change) is not None
 
@@ -121,17 +255,13 @@ async def test_last_meter_change_restored_across_reload(
     await hass.async_block_till_done()
     await _setup_entry(hass, mock_config_entry)
 
-    change_state = hass.states.get(change_id)
-    assert change_state is not None
-    assert change_state.state == original_change
+    assert hass.states.get(change_id).state == original_change
 
     # last_duke_poll is never restored — the reload's own poll repopulates it.
-    poll_state = hass.states.get(poll_id)
-    assert poll_state is not None
-    assert dt_util.parse_datetime(poll_state.state) is not None
+    assert dt_util.parse_datetime(hass.states.get(poll_id).state) is not None
 
 
-async def test_sensors_stay_available_on_failed_poll(
+async def test_diagnostic_sensors_stay_available_on_failed_poll(
     recorder_mock: object,
     hass: HomeAssistant,
     mock_config_entry: MockConfigEntry,
@@ -142,7 +272,9 @@ async def test_sensors_stay_available_on_failed_poll(
     """A failed refresh must not flip the diagnostic sensors to unavailable."""
     mock_config_entry.add_to_hass(hass)
     await _setup_entry(hass, mock_config_entry)
-    poll_id, change_id = _entity_ids(hass, mock_config_entry, "123")
+
+    poll_id = _account_eid(hass, mock_config_entry, "src-1", "last_duke_poll")
+    change_id = _meter_eid(hass, mock_config_entry, "123", "last_meter_change")
 
     coordinator = mock_config_entry.runtime_data
     mock_api_with_meters.get_meters.side_effect = TimeoutError
@@ -152,9 +284,7 @@ async def test_sensors_stay_available_on_failed_poll(
 
     assert coordinator.last_update_success is False
     for entity_id in (poll_id, change_id):
-        state = hass.states.get(entity_id)
-        assert state is not None
-        assert state.state != "unavailable"
+        assert hass.states.get(entity_id).state != "unavailable"
 
 
 async def test_unload_entry(
@@ -168,11 +298,9 @@ async def test_unload_entry(
     """Unloading the entry unloads the sensor platform cleanly."""
     mock_config_entry.add_to_hass(hass)
     await _setup_entry(hass, mock_config_entry)
-    poll_id, _change_id = _entity_ids(hass, mock_config_entry, "123")
+    poll_id = _account_eid(hass, mock_config_entry, "src-1", "last_duke_poll")
 
     assert await hass.config_entries.async_unload(mock_config_entry.entry_id)
     await hass.async_block_till_done()
 
-    state = hass.states.get(poll_id)
-    assert state is not None
-    assert state.state == "unavailable"
+    assert hass.states.get(poll_id).state == "unavailable"

@@ -20,7 +20,8 @@ def _make_id_token(
     email: str = "test@example.com",
     expires_in: int = 3600,
 ) -> str:
-    """Build a minimal unsigned JWT for testing.
+    """
+    Build a minimal unsigned JWT for testing.
 
     PyJWT's decode(options={"verify_signature": False}) only needs the
     base64-encoded header.payload segments to be valid JSON — the signature
@@ -245,6 +246,35 @@ def stats_store() -> Generator[StatsStore]:
         yield store
 
 
+# The current bill cycle starts the day after the most recent invoice's
+# billEndDate (invoices are returned most recent first).
+INVOICES_PAYLOAD = [
+    {"billEndDate": "2026-06-15"},
+    {"billEndDate": "2026-05-14"},
+]
+
+MONTHLY_USAGE_PAYLOAD = {
+    "lastPeriod": {
+        "averageTemp": "68",
+        "bill": 185.50,
+        "days": "30",
+        "totalUsage": 900.00,
+    },
+    "lastYearPeriod": {
+        "averageTemp": "75",
+        "bill": 310.00,
+        "days": "32",
+        "totalUsage": 1500.00,
+    },
+    "thisPeriod": {
+        "averageTemp": "72",
+        "bill": None,
+        "days": "0",
+        "totalUsage": 40.00,
+    },
+}
+
+
 @pytest.fixture
 def mock_api() -> Generator[AsyncMock]:
     """Mock the DukeEnergy client and the OAuth2 session plumbing.
@@ -278,6 +308,8 @@ def mock_api() -> Generator[AsyncMock]:
         mock = mock_cls.return_value
         mock.get_meters = AsyncMock(return_value={})
         mock.get_energy_usage = AsyncMock(return_value={"data": {}, "missing": []})
+        mock.get_monthly_usage = AsyncMock(return_value=MONTHLY_USAGE_PAYLOAD)
+        mock.get_invoices = AsyncMock(return_value=INVOICES_PAYLOAD)
         yield mock
 
 
