@@ -59,6 +59,23 @@ _OFFSET_WINDOW = timedelta(hours=2)
 type DukeEnergyConfigEntry = ConfigEntry[DukeEnergyCoordinator]
 
 
+@dataclass(slots=True, frozen=True)
+class MeterInfo:
+    """A supported meter's identity, for device creation at platform setup."""
+
+    service_type: str
+    src_acct_id: str
+
+
+def _summary_value(summary: dict[str, Any], period: str, key: str) -> float | None:
+    """Pull a numeric field out of a monthly usage summary, or None."""
+    value = (summary.get(period) or {}).get(key)
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 @dataclass(slots=True)
 class _PriceMap:
     """
@@ -121,13 +138,17 @@ class DukeEnergyCoordinator(DataUpdateCoordinator[None]):
         self.api = api
         self._statistic_ids: set = set()
         self._last_successful_date: date | None = None
-        # Diagnostic sensor sources (see sensor.py):
+        # Sensor sources (see sensor.py):
         # when the last poll attempt ran (success or not), when each meter
-        # last had consumption statistics written, and each supported
-        # meter's service type (for device creation at platform setup).
+        # last had consumption statistics written, each supported meter's
+        # identity, each account's display number, per-meter bill-cycle
+        # usage summaries, and per-account bill-cycle costs.
         self.last_poll_time: datetime | None = None
         self.meter_last_updated: dict[str, datetime] = {}
-        self.meter_info: dict[str, str] = {}
+        self.meter_info: dict[str, MeterInfo] = {}
+        self.account_info: dict[str, str] = {}
+        self.monthly_usage: dict[str, dict[str, float | None]] = {}
+        self.account_costs: dict[str, dict[str, float | None]] = {}
         self._unsub_scheduled: Callable[[], None] | None = None
         self._daily_offset: timedelta | None = None
         self._offset_date: date | None = None
@@ -214,6 +235,8 @@ class DukeEnergyCoordinator(DataUpdateCoordinator[None]):
         supported_meter_count = 0
         yesterday_data_count = 0
         temp_accounts_seen: set[str] = set()
+        monthly_accounts_seen: set[str] = set()
+        bill_cycle_starts: dict[str, datetime | None] = {}
         cost_meters: dict[str, dict[str, Any]] = self.config_entry.options.get(
             "cost_meters", {}
         )
@@ -241,7 +264,17 @@ class DukeEnergyCoordinator(DataUpdateCoordinator[None]):
                     )
                     continue
 
-                self.meter_info[serial_number] = meter["serviceType"]
+                src_acct_id = meter["account"]["srcAcctId"]
+                self.meter_info[serial_number] = MeterInfo(
+                    meter["serviceType"], src_acct_id
+                )
+                self.account_info[src_acct_id] = meter["account"]["accountNumber"]
+                # Before the statistics work: its early `continue`s must not
+                # skip the bill-cycle summary refresh.
+                await self._async_update_monthly_usage(
+                    serial_number, src_acct_id, monthly_accounts_seen, bill_cycle_starts
+                )
+
                 id_prefix = f"{meter['serviceType'].lower()}_{serial_number}"
                 consumption_statistic_id = f"{DOMAIN}:{id_prefix}_energy_consumption"
                 self._statistic_ids.add(consumption_statistic_id)
@@ -356,7 +389,6 @@ class DukeEnergyCoordinator(DataUpdateCoordinator[None]):
                     continue
                 temp_accounts_seen.add(account_number)
 
-                src_acct_id = meter["account"]["srcAcctId"]
                 temperature_statistic_id = f"{DOMAIN}:account_{src_acct_id}_temperature"
                 self._statistic_ids.add(temperature_statistic_id)
 
@@ -439,6 +471,85 @@ class DukeEnergyCoordinator(DataUpdateCoordinator[None]):
                     "will retry at next scheduled time"
                 )
             self._schedule_next_check(tz, had_success=had_success)
+
+    async def _async_get_bill_cycle_start(self, account_number: str) -> datetime | None:
+        """
+        Derive the current bill cycle's start from the most recent invoice.
+
+        The cycle starts the day after the last invoice's billEndDate. Returns
+        None when invoices are unavailable, in which case get_monthly_usage
+        falls back to yesterday and thisPeriod only covers the current day.
+        """
+        try:
+            invoices = await self.api.get_invoices(account_number)
+        except DukeEnergyAuthError as err:
+            raise ConfigEntryAuthFailed from err
+        except (TimeoutError, ClientError) as err:
+            _LOGGER.warning(
+                "Could not fetch invoices for account %s: %s", account_number, err
+            )
+            return None
+
+        try:
+            cycle_start = date.fromisoformat(invoices[0]["billEndDate"]) + timedelta(
+                days=1
+            )
+        except (IndexError, KeyError, TypeError, ValueError) as err:
+            _LOGGER.warning(
+                "Could not derive the bill cycle start for account %s: %s",
+                account_number,
+                err,
+            )
+            return None
+        return datetime.combine(cycle_start, time.min)
+
+    async def _async_update_monthly_usage(
+        self,
+        serial_number: str,
+        src_acct_id: str,
+        accounts_seen: set[str],
+        bill_cycle_starts: dict[str, datetime | None],
+    ) -> None:
+        """
+        Refresh a meter's bill-cycle usage summary (see sensor.py).
+
+        Invoices are fetched once per account per poll (cached in
+        ``bill_cycle_starts``) to derive the cycle start shared by the
+        account's meters. The summary's bill amounts are account-wide
+        (identical from every meter on the account), so costs are stored once
+        per account from the first meter seen. A failure here only keeps the
+        previous values; it must not abort statistics ingestion.
+        """
+        if src_acct_id not in bill_cycle_starts:
+            bill_cycle_starts[src_acct_id] = await self._async_get_bill_cycle_start(
+                self.account_info[src_acct_id]
+            )
+
+        try:
+            summary = await self.api.get_monthly_usage(
+                serial_number, start_date=bill_cycle_starts[src_acct_id]
+            )
+        except DukeEnergyAuthError as err:
+            raise ConfigEntryAuthFailed from err
+        except (TimeoutError, ClientError) as err:
+            _LOGGER.warning(
+                "Could not fetch the bill-cycle summary for meter %s: %s",
+                serial_number,
+                err,
+            )
+            return
+
+        self.monthly_usage[serial_number] = {
+            "this_cycle": _summary_value(summary, "thisPeriod", "totalUsage"),
+            "last_cycle": _summary_value(summary, "lastPeriod", "totalUsage"),
+            "last_year": _summary_value(summary, "lastYearPeriod", "totalUsage"),
+        }
+        if src_acct_id not in accounts_seen:
+            accounts_seen.add(src_acct_id)
+            self.account_costs[src_acct_id] = {
+                "last_cycle": _summary_value(summary, "lastPeriod", "bill"),
+                "last_year": _summary_value(summary, "lastYearPeriod", "bill"),
+            }
 
     @staticmethod
     def _stat_start(start: datetime, interval: str) -> datetime:

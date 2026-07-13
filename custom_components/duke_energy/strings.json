@@ -81,6 +81,21 @@
       },
       "last_meter_change": {
         "name": "Last changed"
+      },
+      "usage_this_bill_cycle": {
+        "name": "Usage this bill cycle"
+      },
+      "usage_last_bill_cycle": {
+        "name": "Usage last bill cycle"
+      },
+      "usage_last_year": {
+        "name": "Usage this time last year"
+      },
+      "cost_last_bill_cycle": {
+        "name": "Cost last bill cycle"
+      },
+      "cost_last_year": {
+        "name": "Cost this time last year"
       }
     }
   },
