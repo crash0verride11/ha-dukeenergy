@@ -5,6 +5,8 @@ __pycache__
 */build/*
 */dist/*
 
+# dev environment
+/custom_components/duke_energy/aiodukeenergy*
 
 # misc
 .coverage
@@ -19,4 +21,3 @@ CLAUDE.md
 # Home Assistant configuration
 config/*
 !config/configuration.yaml
-
