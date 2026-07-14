@@ -472,32 +472,38 @@ class DukeEnergyCoordinator(DataUpdateCoordinator[None]):
                 )
             self._schedule_next_check(tz, had_success=had_success)
 
-    async def _async_get_bill_cycle_start(self, account_number: str) -> datetime | None:
+    async def _async_get_bill_cycle_start(self, serial_number: str) -> datetime | None:
         """
-        Derive the current bill cycle's start from the most recent invoice.
+        Derive the current bill cycle's start from the MONTHLY usage graph.
 
-        The cycle starts the day after the last invoice's billEndDate. Returns
-        None when invoices are unavailable, in which case get_monthly_usage
-        falls back to yesterday and thisPeriod only covers the current day.
+        The graph returns only completed cycles, so the current cycle starts
+        the day after the last entry's endDate. Returns None when the graph
+        is unavailable, in which case get_monthly_usage falls back to
+        yesterday and thisPeriod only covers the current day.
         """
+        tz = await dt_util.async_get_time_zone(_DUKE_TZ)
+        end = dt_util.now(tz) - timedelta(days=1)
+        # A ~2-month window guarantees at least one completed ~30-day cycle.
+        start = end - timedelta(days=62)
         try:
-            invoices = await self.api.get_invoices(account_number)
+            result = await self.api.get_energy_usage(
+                serial_number, "MONTHLY", "YEAR", start, end
+            )
         except DukeEnergyAuthError as err:
             raise ConfigEntryAuthFailed from err
         except (TimeoutError, ClientError) as err:
             _LOGGER.warning(
-                "Could not fetch invoices for account %s: %s", account_number, err
+                "Could not fetch billing cycles for meter %s: %s", serial_number, err
             )
             return None
 
         try:
-            cycle_start = date.fromisoformat(invoices[0]["billEndDate"]) + timedelta(
-                days=1
-            )
+            cycles = result["data"]
+            cycle_start = date.fromisoformat(cycles[-1]["endDate"]) + timedelta(days=1)
         except (IndexError, KeyError, TypeError, ValueError) as err:
             _LOGGER.warning(
-                "Could not derive the bill cycle start for account %s: %s",
-                account_number,
+                "Could not derive the bill cycle start for meter %s: %s",
+                serial_number,
                 err,
             )
             return None
@@ -513,16 +519,16 @@ class DukeEnergyCoordinator(DataUpdateCoordinator[None]):
         """
         Refresh a meter's bill-cycle usage summary (see sensor.py).
 
-        Invoices are fetched once per account per poll (cached in
-        ``bill_cycle_starts``) to derive the cycle start shared by the
-        account's meters. The summary's bill amounts are account-wide
-        (identical from every meter on the account), so costs are stored once
-        per account from the first meter seen. A failure here only keeps the
+        The billing cycle is account-wide, so its start is derived once per
+        account per poll (cached in ``bill_cycle_starts``) from the first
+        meter seen and shared by the account's meters. The summary's bill
+        amounts are likewise account-wide, so costs are stored once per
+        account from the first meter seen. A failure here only keeps the
         previous values; it must not abort statistics ingestion.
         """
         if src_acct_id not in bill_cycle_starts:
             bill_cycle_starts[src_acct_id] = await self._async_get_bill_cycle_start(
-                self.account_info[src_acct_id]
+                serial_number
             )
 
         try:
