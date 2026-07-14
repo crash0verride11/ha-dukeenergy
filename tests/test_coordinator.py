@@ -82,8 +82,9 @@ async def test_update(
 
     assert coordinator.last_update_success is True
     assert mock_api_with_meters.get_meters.call_count == 1
-    # 3 years of electric data in 30-day windows: ceil(3*365/30) == 37
-    assert mock_api_with_meters.get_energy_usage.call_count == 37
+    # 3 years of electric data in 30-day windows (ceil(3*365/30) == 37),
+    # plus one MONTHLY billing-cycle lookup.
+    assert mock_api_with_meters.get_energy_usage.call_count == 38
 
     metadata, statistics = _call_for(stats_store, consumption_id)
     assert metadata["source"] == "duke_energy"

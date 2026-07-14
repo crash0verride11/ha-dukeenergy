@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from unittest.mock import AsyncMock
+from unittest.mock import DEFAULT, AsyncMock
 
 from aiohttp import ClientError
 from homeassistant.const import STATE_UNKNOWN, UnitOfEnergy, UnitOfVolume
@@ -54,7 +54,7 @@ async def test_devices_and_diagnostic_sensors(
     stats_store: StatsStore,
     auto_enable_custom_integrations: None,
 ) -> None:
-    """Account device owns Last updated; meter device (via account) owns Last changed."""
+    """Account device owns Last updated; meter device owns Last changed."""
     mock_config_entry.add_to_hass(hass)
     await _setup_entry(hass, mock_config_entry)
 
@@ -95,11 +95,12 @@ async def test_summary_sensor_values(
     mock_config_entry.add_to_hass(hass)
     await _setup_entry(hass, mock_config_entry)
 
-    # The cycle start comes from the newest invoice's billEndDate + 1 day.
+    # The cycle start is the last completed cycle's endDate + 1 day, from the
+    # MONTHLY usage graph.
     assert mock_api_with_meters.get_monthly_usage.await_count == 1
     assert mock_api_with_meters.get_monthly_usage.await_args.kwargs[
         "start_date"
-    ] == datetime(2026, 6, 16)
+    ] == datetime(2026, 6, 27)
 
     for key, expected in (
         ("usage_this_bill_cycle", "40.0"),
@@ -139,7 +140,7 @@ async def test_gas_usage_sensor_units(
     assert state.attributes["device_class"] == "gas"
 
 
-async def test_invoices_fetched_once_per_account(
+async def test_billing_cycles_fetched_once_per_account(
     recorder_mock: object,
     hass: HomeAssistant,
     mock_config_entry: MockConfigEntry,
@@ -147,7 +148,7 @@ async def test_invoices_fetched_once_per_account(
     stats_store: StatsStore,
     auto_enable_custom_integrations: None,
 ) -> None:
-    """Two meters on one account share a single invoice lookup and cycle start."""
+    """Two meters on one account share a single cycle lookup and start date."""
     electric = mock_api_with_meters.get_meters.return_value["123"]
     mock_api_with_meters.get_meters.return_value["456"] = {
         "serialNum": "456",
@@ -158,17 +159,23 @@ async def test_invoices_fetched_once_per_account(
     mock_config_entry.add_to_hass(hass)
     await _setup_entry(hass, mock_config_entry)
 
-    assert mock_api_with_meters.get_invoices.await_count == 1
-    assert mock_api_with_meters.get_invoices.await_args.args == ("acct-1",)
+    monthly_calls = [
+        call
+        for call in mock_api_with_meters.get_energy_usage.await_args_list
+        if call.args[1] == "MONTHLY"
+    ]
+    assert len(monthly_calls) == 1
+    assert monthly_calls[0].args[0] == "123"  # the account's first meter
+    assert monthly_calls[0].args[2] == "YEAR"
     assert mock_api_with_meters.get_monthly_usage.await_count == 2
     start_dates = {
         call.kwargs["start_date"]
         for call in mock_api_with_meters.get_monthly_usage.await_args_list
     }
-    assert start_dates == {datetime(2026, 6, 16)}
+    assert start_dates == {datetime(2026, 6, 27)}
 
 
-async def test_invoice_failure_falls_back_to_default_window(
+async def test_billing_cycle_failure_falls_back_to_default_window(
     recorder_mock: object,
     hass: HomeAssistant,
     mock_config_entry: MockConfigEntry,
@@ -176,8 +183,16 @@ async def test_invoice_failure_falls_back_to_default_window(
     stats_store: StatsStore,
     auto_enable_custom_integrations: None,
 ) -> None:
-    """A failing invoice lookup still fetches the summary, with no start date."""
-    mock_api_with_meters.get_invoices.side_effect = ClientError
+    """A failing cycle lookup still fetches the summary, with no start date."""
+
+    def _fail_monthly(
+        _serial: str, interval: str, *_args: object, **_kwargs: object
+    ) -> object:
+        if interval == "MONTHLY":
+            raise ClientError
+        return DEFAULT
+
+    mock_api_with_meters.get_energy_usage.side_effect = _fail_monthly
     mock_config_entry.add_to_hass(hass)
     await _setup_entry(hass, mock_config_entry)
 

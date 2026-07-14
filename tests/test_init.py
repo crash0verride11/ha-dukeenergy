@@ -28,7 +28,7 @@ async def test_setup_entry(
     mock_config_entry.add_to_hass(hass)
     mock_config_entry.mock_state(hass, ConfigEntryState.SETUP_IN_PROGRESS)
 
-    with (  # noqa: SIM117 — the setup lock must be held inside the patches
+    with (
         patch(
             "custom_components.duke_energy.DukeEnergyAuth", autospec=True
         ) as mock_auth_cls,

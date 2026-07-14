@@ -6,7 +6,7 @@ import base64
 import json
 import time
 from collections.abc import Generator
-from unittest.mock import AsyncMock, Mock, patch
+from unittest.mock import DEFAULT, AsyncMock, Mock, patch
 
 import pytest
 
@@ -246,11 +246,23 @@ def stats_store() -> Generator[StatsStore]:
         yield store
 
 
-# The current bill cycle starts the day after the most recent invoice's
-# billEndDate (invoices are returned most recent first).
-INVOICES_PAYLOAD = [
-    {"billEndDate": "2026-06-15"},
-    {"billEndDate": "2026-05-14"},
+# Completed billing cycles from the MONTHLY usage graph, oldest first. The
+# current cycle starts the day after the last entry's endDate.
+BILLING_CYCLES_PAYLOAD = [
+    {
+        "date": "2026-05",
+        "endDate": "2026-05-27",
+        "startDate": "2026-04-29",
+        "temperatureAvg": "62.94",
+        "usage": "853.644",
+    },
+    {
+        "date": "2026-06",
+        "endDate": "2026-06-26",
+        "startDate": "2026-05-28",
+        "temperatureAvg": "72.58",
+        "usage": "1098.43",
+    },
 ]
 
 MONTHLY_USAGE_PAYLOAD = {
@@ -305,11 +317,26 @@ def mock_api() -> Generator[AsyncMock]:
             return_value=AsyncMock(),
         ),
     ):
+
+        def _energy_usage_dispatch(
+            _serial: str, interval: str, *_args: object, **_kwargs: object
+        ) -> object:
+            """Serve MONTHLY billing-cycle queries.
+
+            DEFAULT falls through to return_value, so tests can still
+            override the HOURLY/DAILY data.
+            """
+            if interval == "MONTHLY":
+                return {"data": BILLING_CYCLES_PAYLOAD, "missing": []}
+            return DEFAULT
+
         mock = mock_cls.return_value
         mock.get_meters = AsyncMock(return_value={})
-        mock.get_energy_usage = AsyncMock(return_value={"data": {}, "missing": []})
+        mock.get_energy_usage = AsyncMock(
+            return_value={"data": {}, "missing": []},
+            side_effect=_energy_usage_dispatch,
+        )
         mock.get_monthly_usage = AsyncMock(return_value=MONTHLY_USAGE_PAYLOAD)
-        mock.get_invoices = AsyncMock(return_value=INVOICES_PAYLOAD)
         yield mock
 
 
