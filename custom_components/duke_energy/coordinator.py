@@ -56,6 +56,11 @@ _DUKE_TZ = "America/New_York"
 _BASE_TIMES_ET = (time(9, 0), time(14, 0), time(19, 0))
 _OFFSET_WINDOW = timedelta(hours=2)
 
+# A cached bill-cycle start older than this is likely from an already-closed
+# cycle (cycles run ~30 days); reusing it would window this-cycle usage
+# across two cycles.
+_CYCLE_START_MAX_AGE_DAYS = 28
+
 type DukeEnergyConfigEntry = ConfigEntry[DukeEnergyCoordinator]
 
 
@@ -149,6 +154,10 @@ class DukeEnergyCoordinator(DataUpdateCoordinator[None]):
         self.account_info: dict[str, str] = {}
         self.monthly_usage: dict[str, dict[str, float | None]] = {}
         self.account_costs: dict[str, dict[str, float | None]] = {}
+        # Last successfully derived bill-cycle start per account. A cycle's
+        # start does not change mid-cycle, so this is reused (while plausibly
+        # current) when the graph lookup fails on a later poll.
+        self._cycle_start_by_account: dict[str, datetime] = {}
         self._unsub_scheduled: Callable[[], None] | None = None
         self._daily_offset: timedelta | None = None
         self._offset_date: date | None = None
@@ -472,14 +481,19 @@ class DukeEnergyCoordinator(DataUpdateCoordinator[None]):
                 )
             self._schedule_next_check(tz, had_success=had_success)
 
-    async def _async_get_bill_cycle_start(self, serial_number: str) -> datetime | None:
+    async def _async_get_bill_cycle_start(
+        self, serial_number: str, src_acct_id: str
+    ) -> datetime | None:
         """
         Derive the current bill cycle's start from the MONTHLY usage graph.
 
         The graph returns only completed cycles, so the current cycle starts
-        the day after the last entry's endDate. Returns None when the graph
-        is unavailable, in which case get_monthly_usage falls back to
-        yesterday and thisPeriod only covers the current day.
+        the day after the last entry's endDate. When the graph is unavailable,
+        the last derived start is reused while plausibly still current — a
+        cycle's start does not change mid-cycle, so a stale start is only
+        possible right around a rollover. With no plausible start at all,
+        None is returned and the caller reports this-cycle usage as unknown
+        rather than a wrong-window value.
         """
         tz = await dt_util.async_get_time_zone(_DUKE_TZ)
         end = dt_util.now(tz) - timedelta(days=1)
@@ -489,25 +503,41 @@ class DukeEnergyCoordinator(DataUpdateCoordinator[None]):
             result = await self.api.get_energy_usage(
                 serial_number, "MONTHLY", "YEAR", start, end
             )
-        except DukeEnergyAuthError as err:
-            raise ConfigEntryAuthFailed from err
-        except (TimeoutError, ClientError) as err:
-            _LOGGER.warning(
-                "Could not fetch billing cycles for meter %s: %s", serial_number, err
-            )
-            return None
-
-        try:
             cycles = result["data"]
             cycle_start = date.fromisoformat(cycles[-1]["endDate"]) + timedelta(days=1)
-        except (IndexError, KeyError, TypeError, ValueError) as err:
+        except DukeEnergyAuthError as err:
+            raise ConfigEntryAuthFailed from err
+        except (
+            TimeoutError,
+            ClientError,
+            IndexError,
+            KeyError,
+            TypeError,
+            ValueError,
+        ) as err:
+            cached = self._cycle_start_by_account.get(src_acct_id)
+            if (
+                cached is not None
+                and (end.date() - cached.date()).days < _CYCLE_START_MAX_AGE_DAYS
+            ):
+                _LOGGER.debug(
+                    "Billing cycle lookup failed for meter %s (%s); "
+                    "reusing cached cycle start %s",
+                    serial_number,
+                    err,
+                    cached.date(),
+                )
+                return cached
             _LOGGER.warning(
                 "Could not derive the bill cycle start for meter %s: %s",
                 serial_number,
                 err,
             )
             return None
-        return datetime.combine(cycle_start, time.min)
+
+        derived = datetime.combine(cycle_start, time.min)
+        self._cycle_start_by_account[src_acct_id] = derived
+        return derived
 
     async def _async_update_monthly_usage(
         self,
@@ -528,12 +558,13 @@ class DukeEnergyCoordinator(DataUpdateCoordinator[None]):
         """
         if src_acct_id not in bill_cycle_starts:
             bill_cycle_starts[src_acct_id] = await self._async_get_bill_cycle_start(
-                serial_number
+                serial_number, src_acct_id
             )
+        start_date = bill_cycle_starts[src_acct_id]
 
         try:
             summary = await self.api.get_monthly_usage(
-                serial_number, start_date=bill_cycle_starts[src_acct_id]
+                serial_number, start_date=start_date
             )
         except DukeEnergyAuthError as err:
             raise ConfigEntryAuthFailed from err
@@ -546,7 +577,14 @@ class DukeEnergyCoordinator(DataUpdateCoordinator[None]):
             return
 
         self.monthly_usage[serial_number] = {
-            "this_cycle": _summary_value(summary, "thisPeriod", "totalUsage"),
+            # Without a cycle start the endpoint windows thisPeriod to just
+            # yesterday — a wrong-window value, so report unknown instead.
+            # The other periods are computed server-side regardless.
+            "this_cycle": (
+                _summary_value(summary, "thisPeriod", "totalUsage")
+                if start_date is not None
+                else None
+            ),
             "last_cycle": _summary_value(summary, "lastPeriod", "totalUsage"),
             "last_year": _summary_value(summary, "lastYearPeriod", "totalUsage"),
         }
