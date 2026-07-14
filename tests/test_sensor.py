@@ -6,6 +6,7 @@ from datetime import datetime
 from unittest.mock import DEFAULT, AsyncMock
 
 from aiohttp import ClientError
+from freezegun.api import FrozenDateTimeFactory
 from homeassistant.const import STATE_UNKNOWN, UnitOfEnergy, UnitOfVolume
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import device_registry as dr
@@ -175,7 +176,16 @@ async def test_billing_cycles_fetched_once_per_account(
     assert start_dates == {datetime(2026, 6, 27)}
 
 
-async def test_billing_cycle_failure_falls_back_to_default_window(
+def _fail_monthly(
+    _serial: str, interval: str, *_args: object, **_kwargs: object
+) -> object:
+    """get_energy_usage side effect: MONTHLY graph queries fail."""
+    if interval == "MONTHLY":
+        raise ClientError
+    return DEFAULT
+
+
+async def test_billing_cycle_failure_without_cache(
     recorder_mock: object,
     hass: HomeAssistant,
     mock_config_entry: MockConfigEntry,
@@ -183,15 +193,13 @@ async def test_billing_cycle_failure_falls_back_to_default_window(
     stats_store: StatsStore,
     auto_enable_custom_integrations: None,
 ) -> None:
-    """A failing cycle lookup still fetches the summary, with no start date."""
+    """
+    With no derivable or cached cycle start, this-cycle usage is unknown.
 
-    def _fail_monthly(
-        _serial: str, interval: str, *_args: object, **_kwargs: object
-    ) -> object:
-        if interval == "MONTHLY":
-            raise ClientError
-        return DEFAULT
-
+    The summary is still fetched with no start date: last-cycle and last-year
+    values are computed server-side regardless of the window, so only the
+    wrong-window this-cycle value is withheld.
+    """
     mock_api_with_meters.get_energy_usage.side_effect = _fail_monthly
     mock_config_entry.add_to_hass(hass)
     await _setup_entry(hass, mock_config_entry)
@@ -199,8 +207,72 @@ async def test_billing_cycle_failure_falls_back_to_default_window(
     assert (
         mock_api_with_meters.get_monthly_usage.await_args.kwargs["start_date"] is None
     )
-    usage_id = _meter_eid(hass, mock_config_entry, "123", "usage_this_bill_cycle")
-    assert hass.states.get(usage_id).state == "40.0"
+    this_id = _meter_eid(hass, mock_config_entry, "123", "usage_this_bill_cycle")
+    last_id = _meter_eid(hass, mock_config_entry, "123", "usage_last_bill_cycle")
+    cost_id = _account_eid(hass, mock_config_entry, "src-1", "cost_last_bill_cycle")
+    assert hass.states.get(this_id).state == STATE_UNKNOWN
+    assert hass.states.get(last_id).state == "900.0"
+    assert hass.states.get(cost_id).state == "185.5"
+
+
+async def test_billing_cycle_cached_start_reused(
+    recorder_mock: object,
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+    mock_api_with_meters: AsyncMock,
+    stats_store: StatsStore,
+    auto_enable_custom_integrations: None,
+    freezer: FrozenDateTimeFactory,
+) -> None:
+    """A graph failure mid-cycle reuses the previously derived cycle start."""
+    # Pin time near the payload's cycle dates: the derived start (2026-06-27)
+    # is 15 days old at 2026-07-13 — plausibly still the current cycle.
+    freezer.move_to("2026-07-13T12:00:00-04:00")
+    mock_config_entry.add_to_hass(hass)
+    await _setup_entry(hass, mock_config_entry)
+
+    mock_api_with_meters.get_energy_usage.side_effect = _fail_monthly
+    coordinator = mock_config_entry.runtime_data
+    coordinator._last_successful_date = None  # force a real poll
+    await coordinator.async_refresh()
+    await hass.async_block_till_done()
+
+    assert mock_api_with_meters.get_monthly_usage.await_args.kwargs[
+        "start_date"
+    ] == datetime(2026, 6, 27)
+    this_id = _meter_eid(hass, mock_config_entry, "123", "usage_this_bill_cycle")
+    assert hass.states.get(this_id).state == "40.0"
+
+
+async def test_billing_cycle_stale_cache_rejected(
+    recorder_mock: object,
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+    mock_api_with_meters: AsyncMock,
+    stats_store: StatsStore,
+    auto_enable_custom_integrations: None,
+    freezer: FrozenDateTimeFactory,
+) -> None:
+    """A cached cycle start past a cycle's length is not reused."""
+    # At 2026-08-30 the payload-derived start (2026-06-27) is 64 days old —
+    # well past a ~30-day cycle, so a rollover must have happened since.
+    freezer.move_to("2026-08-30T12:00:00-04:00")
+    mock_config_entry.add_to_hass(hass)
+    await _setup_entry(hass, mock_config_entry)
+
+    this_id = _meter_eid(hass, mock_config_entry, "123", "usage_this_bill_cycle")
+    assert hass.states.get(this_id).state == "40.0"
+
+    mock_api_with_meters.get_energy_usage.side_effect = _fail_monthly
+    coordinator = mock_config_entry.runtime_data
+    coordinator._last_successful_date = None  # force a real poll
+    await coordinator.async_refresh()
+    await hass.async_block_till_done()
+
+    assert (
+        mock_api_with_meters.get_monthly_usage.await_args.kwargs["start_date"] is None
+    )
+    assert hass.states.get(this_id).state == STATE_UNKNOWN
 
 
 async def test_summary_failure_keeps_poll_working(
