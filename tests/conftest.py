@@ -286,6 +286,23 @@ MONTHLY_USAGE_PAYLOAD = {
     },
 }
 
+# Billing and payment headline info, keyed by account number (as the library
+# returns it). Includes a closed account with no dueDate.
+BILLING_PAYMENT_PAYLOAD = {
+    "acct-1": {
+        "accountNumber": "acct-1",
+        "balance": 200.17,
+        "dueDate": "2024-05-22",
+        "abbreviatedBillStatus": "PAYMENT SCHEDULED",
+    },
+    "acct-2": {
+        "accountNumber": "acct-2",
+        "balance": 0.0,
+        "dueDate": None,
+        "abbreviatedBillStatus": "PAID",
+    },
+}
+
 
 @pytest.fixture
 def mock_api() -> Generator[AsyncMock]:
@@ -337,6 +354,7 @@ def mock_api() -> Generator[AsyncMock]:
             side_effect=_energy_usage_dispatch,
         )
         mock.get_monthly_usage = AsyncMock(return_value=MONTHLY_USAGE_PAYLOAD)
+        mock.get_billing_payment_info = AsyncMock(return_value=BILLING_PAYMENT_PAYLOAD)
         yield mock
 
 

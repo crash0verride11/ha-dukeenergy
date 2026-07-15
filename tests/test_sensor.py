@@ -16,6 +16,7 @@ from homeassistant.util import dt as dt_util
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.duke_energy.const import DOMAIN
+from custom_components.duke_energy.sensor import _as_date, _as_float, _as_sentence
 
 from .conftest import StatsStore
 
@@ -119,6 +120,70 @@ async def test_summary_sensor_values(
         state = hass.states.get(_account_eid(hass, mock_config_entry, "src-1", key))
         assert state.state == expected
         assert state.attributes["device_class"] == "monetary"
+
+
+async def test_billing_payment_sensors(
+    recorder_mock: object,
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+    mock_api_with_meters: AsyncMock,
+    stats_store: StatsStore,
+    auto_enable_custom_integrations: None,
+) -> None:
+    """Balance, due date, and (sentence-cased) status appear on the account."""
+    mock_config_entry.add_to_hass(hass)
+    await _setup_entry(hass, mock_config_entry)
+
+    mock_api_with_meters.get_billing_payment_info.assert_awaited_once_with(
+        include_closed=True
+    )
+
+    balance = hass.states.get(
+        _account_eid(hass, mock_config_entry, "src-1", "bill_balance")
+    )
+    assert balance.state == "200.17"
+    assert balance.attributes["device_class"] == "monetary"
+
+    due = hass.states.get(
+        _account_eid(hass, mock_config_entry, "src-1", "bill_due_date")
+    )
+    assert due.state == "2024-05-22"
+    assert due.attributes["device_class"] == "date"
+
+    status = hass.states.get(
+        _account_eid(hass, mock_config_entry, "src-1", "bill_status")
+    )
+    assert status.state == "Payment scheduled"
+
+
+def test_billing_coercers_tolerate_missing_fields() -> None:
+    """The billing coercers return None for absent/null fields (e.g. dueDate)."""
+    assert _as_float(None) is None
+    assert _as_date(None) is None
+    assert _as_sentence(None) is None
+
+
+async def test_billing_failure_keeps_poll_working(
+    recorder_mock: object,
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+    mock_api_with_meters: AsyncMock,
+    stats_store: StatsStore,
+    auto_enable_custom_integrations: None,
+) -> None:
+    """A failing billing call leaves its sensors unknown but the poll succeeds."""
+    mock_api_with_meters.get_billing_payment_info.side_effect = ClientError
+    mock_config_entry.add_to_hass(hass)
+    await _setup_entry(hass, mock_config_entry)
+
+    coordinator = mock_config_entry.runtime_data
+    assert coordinator.last_update_success is True
+    assert "duke_energy:electric_123_energy_consumption" in stats_store.data
+
+    balance = hass.states.get(
+        _account_eid(hass, mock_config_entry, "src-1", "bill_balance")
+    )
+    assert balance.state == STATE_UNKNOWN
 
 
 async def test_gas_usage_sensor_units(
