@@ -154,6 +154,8 @@ class DukeEnergyCoordinator(DataUpdateCoordinator[None]):
         self.account_info: dict[str, str] = {}
         self.monthly_usage: dict[str, dict[str, float | None]] = {}
         self.account_costs: dict[str, dict[str, float | None]] = {}
+        # Billing and payment headline info per account number (see sensor.py).
+        self.billing_payment_info: dict[str, dict[str, Any]] = {}
         # Last successfully derived bill-cycle start per account. A cycle's
         # start does not change mid-cycle, so this is reused (while plausibly
         # current) when the graph lookup fails on a later poll.
@@ -454,6 +456,9 @@ class DukeEnergyCoordinator(DataUpdateCoordinator[None]):
 
                 # --- End temperature statistic addition
 
+            if self.account_info:
+                await self._async_update_billing_payment_info()
+
             if do_backfill:
                 # One-shot: clear the flag now that history has been repriced, so
                 # the full reprice does not repeat on every poll or on restart.
@@ -594,6 +599,24 @@ class DukeEnergyCoordinator(DataUpdateCoordinator[None]):
                 "last_cycle": _summary_value(summary, "lastPeriod", "bill"),
                 "last_year": _summary_value(summary, "lastYearPeriod", "bill"),
             }
+
+    async def _async_update_billing_payment_info(self) -> None:
+        """
+        Refresh billing and payment headline info for every account.
+
+        A single login-wide call (keyed by account number, closed accounts
+        included), so it runs once per poll rather than per meter. A failure
+        only keeps the previous values; it must not abort statistics ingestion.
+        """
+        try:
+            info = await self.api.get_billing_payment_info(include_closed=True)
+        except DukeEnergyAuthError as err:
+            raise ConfigEntryAuthFailed from err
+        except (TimeoutError, ClientError) as err:
+            _LOGGER.warning("Could not fetch billing and payment info: %s", err)
+            return
+
+        self.billing_payment_info = info
 
     @staticmethod
     def _stat_start(start: datetime, interval: str) -> datetime:

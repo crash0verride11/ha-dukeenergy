@@ -19,8 +19,8 @@ holding:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
-from typing import TYPE_CHECKING
+from datetime import date, datetime
+from typing import TYPE_CHECKING, Any
 
 from homeassistant.components.sensor import (
     RestoreSensor,
@@ -36,6 +36,8 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from .const import DOMAIN
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from homeassistant.core import HomeAssistant
     from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
@@ -44,6 +46,29 @@ if TYPE_CHECKING:
         DukeEnergyCoordinator,
         MeterInfo,
     )
+
+
+def _as_float(value: Any) -> float | None:
+    """Coerce a billing field to a float, or None."""
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _as_date(value: Any) -> date | None:
+    """Parse an ISO date string (e.g. dueDate), or None."""
+    try:
+        return date.fromisoformat(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _as_sentence(value: Any) -> str | None:
+    """Render an all-caps status (e.g. abbreviatedBillStatus) as a sentence."""
+    if not isinstance(value, str) or not value:
+        return None
+    return value.capitalize()
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -92,6 +117,35 @@ COST_SENSORS: tuple[DukeEnergySummarySensorDescription, ...] = (
 )
 
 
+@dataclass(frozen=True, kw_only=True)
+class DukeEnergyBillingSensorDescription(SensorEntityDescription):
+    """Describes a sensor fed from the billing and payment info."""
+
+    value_fn: Callable[[dict[str, Any]], Any]
+
+
+BILLING_SENSORS: tuple[DukeEnergyBillingSensorDescription, ...] = (
+    DukeEnergyBillingSensorDescription(
+        key="bill_balance",
+        translation_key="bill_balance",
+        device_class=SensorDeviceClass.MONETARY,
+        suggested_display_precision=2,
+        value_fn=lambda acct: _as_float(acct.get("balance")),
+    ),
+    DukeEnergyBillingSensorDescription(
+        key="bill_due_date",
+        translation_key="bill_due_date",
+        device_class=SensorDeviceClass.DATE,
+        value_fn=lambda acct: _as_date(acct.get("dueDate")),
+    ),
+    DukeEnergyBillingSensorDescription(
+        key="bill_status",
+        translation_key="bill_status",
+        value_fn=lambda acct: _as_sentence(acct.get("abbreviatedBillStatus")),
+    ),
+)
+
+
 async def async_setup_entry(
     _hass: HomeAssistant,
     entry: DukeEnergyConfigEntry,
@@ -120,6 +174,12 @@ async def async_setup_entry(
                     coordinator, entry, info.src_acct_id, description
                 )
                 for description in COST_SENSORS
+            )
+            entities.extend(
+                DukeEnergyBillingSensor(
+                    coordinator, entry, info.src_acct_id, description
+                )
+                for description in BILLING_SENSORS
             )
         entities.append(
             DukeEnergyLastChangeSensor(coordinator, entry, serial_number, info)
@@ -307,3 +367,31 @@ class DukeEnergyAccountCostSensor(DukeEnergyAccountEntity):
         """Return the bill amount for this sensor's period."""
         costs = self.coordinator.account_costs.get(self._src_acct_id)
         return costs.get(self.entity_description.bucket) if costs else None
+
+
+class DukeEnergyBillingSensor(DukeEnergyAccountEntity):
+    """An account-wide billing and payment headline value."""
+
+    entity_description: DukeEnergyBillingSensorDescription
+
+    def __init__(
+        self,
+        coordinator: DukeEnergyCoordinator,
+        entry: DukeEnergyConfigEntry,
+        src_acct_id: str,
+        description: DukeEnergyBillingSensorDescription,
+    ) -> None:
+        """Initialize, adding the currency unit for the monetary balance."""
+        self.entity_description = description
+        super().__init__(coordinator, entry, src_acct_id, description.key)
+        if description.device_class is SensorDeviceClass.MONETARY:
+            self._attr_native_unit_of_measurement = (
+                coordinator.hass.config.currency or "USD"
+            )
+
+    @property
+    def native_value(self) -> float | date | str | None:
+        """Return this sensor's billing value for the account."""
+        account_number = self.coordinator.account_info.get(self._src_acct_id)
+        account = self.coordinator.billing_payment_info.get(account_number or "")
+        return self.entity_description.value_fn(account) if account else None

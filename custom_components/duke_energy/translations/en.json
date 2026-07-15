@@ -96,6 +96,15 @@
             },
             "cost_last_year": {
                 "name": "Cost this time last year"
+            },
+            "bill_balance": {
+                "name": "Bill balance"
+            },
+            "bill_due_date": {
+                "name": "Bill due date"
+            },
+            "bill_status": {
+                "name": "Bill status"
             }
         }
     },
