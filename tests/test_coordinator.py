@@ -20,7 +20,14 @@ from pytest_homeassistant_custom_component.common import (
 
 from custom_components.duke_energy.coordinator import DukeEnergyCoordinator
 
-from .conftest import StatsStore
+from .conftest import StatsStore, register_carriers
+
+# Carrier entity ids (== statistic ids) as register_carriers creates them.
+ELECTRIC_CONSUMPTION_ID = "sensor.duke_electric_123_energy_consumption"
+ELECTRIC_COST_ID = "sensor.duke_electric_123_total_cost"
+GAS_CONSUMPTION_ID = "sensor.duke_gas_456_energy_consumption"
+GAS_COST_ID = "sensor.duke_gas_456_total_cost"
+TEMPERATURE_ID = "sensor.duke_account_src_1_temperature"
 
 
 def _call_for(store: StatsStore, statistic_id: str) -> tuple[dict, list]:
@@ -29,7 +36,7 @@ def _call_for(store: StatsStore, statistic_id: str) -> tuple[dict, list]:
         _, metadata, statistics = call.args
         if metadata["statistic_id"] == statistic_id:
             return metadata, statistics
-    msg = f"no external statistics inserted for {statistic_id}"
+    msg = f"no statistics imported for {statistic_id}"
     raise AssertionError(msg)
 
 
@@ -74,8 +81,9 @@ async def test_update(
 ) -> None:
     """Coordinator inserts consumption + temperature stats, then refreshes incrementally."""
     mock_config_entry.add_to_hass(hass)
+    ids = register_carriers(hass)
+    assert ids["consumption"] == ELECTRIC_CONSUMPTION_ID
     coordinator = DukeEnergyCoordinator(hass, mock_api_with_meters, mock_config_entry)
-    consumption_id = "duke_energy:electric_123_energy_consumption"
 
     await coordinator.async_refresh()
     await hass.async_block_till_done()
@@ -86,9 +94,9 @@ async def test_update(
     # plus one MONTHLY billing-cycle lookup.
     assert mock_api_with_meters.get_energy_usage.call_count == 38
 
-    metadata, statistics = _call_for(stats_store, consumption_id)
-    assert metadata["source"] == "duke_energy"
-    assert metadata["name"] == "Duke Energy Electric 123 Consumption"
+    metadata, statistics = _call_for(stats_store, ELECTRIC_CONSUMPTION_ID)
+    assert metadata["source"] == "recorder"
+    assert metadata["name"] is None
     assert metadata["unit_class"] == EnergyConverter.UNIT_CLASS
     assert metadata["unit_of_measurement"] == UnitOfEnergy.KILO_WATT_HOUR
     assert metadata["has_sum"] is True
@@ -101,7 +109,7 @@ async def test_update(
     assert statistics[0]["sum"] == pytest.approx(1.3)
 
     # A temperature stat is registered per account.
-    assert "duke_energy:account_src-1_temperature" in stats_store.data
+    assert TEMPERATURE_ID in stats_store.data
 
     # --- Incremental refresh on a later day: the one reading equals the last
     # stored start, so it is filtered out and the consumption insert is empty.
@@ -115,7 +123,7 @@ async def test_update(
 
     assert coordinator.last_update_success is True
     assert mock_api_with_meters.get_meters.call_count == 2
-    _, incremental_stats = _call_for(stats_store, consumption_id)
+    _, incremental_stats = _call_for(stats_store, ELECTRIC_CONSUMPTION_ID)
     assert incremental_stats == []
 
 
@@ -127,6 +135,7 @@ async def test_gas_meter_update(
 ) -> None:
     """Coordinator handles gas meters: DAILY/WEEK API params, noon offset, CCF unit."""
     mock_config_entry.add_to_hass(hass)
+    register_carriers(hass, service_type="GAS", serial="456", src_acct_id="src-2")
     coordinator = DukeEnergyCoordinator(
         hass, mock_api_with_gas_meter, mock_config_entry
     )
@@ -139,10 +148,8 @@ async def test_gas_meter_update(
     assert sample_call.args[1] == "DAILY"
     assert sample_call.args[2] == "WEEK"
 
-    metadata, statistics = _call_for(
-        stats_store, "duke_energy:gas_456_energy_consumption"
-    )
-    assert metadata["name"] == "Duke Energy Gas 456 Consumption"
+    metadata, statistics = _call_for(stats_store, GAS_CONSUMPTION_ID)
+    assert metadata["name"] is None
     assert metadata["unit_class"] == "volume"
     assert metadata["unit_of_measurement"] == UnitOfVolume.CENTUM_CUBIC_FEET
     assert metadata["has_sum"] is True
@@ -166,6 +173,7 @@ async def test_cost_incremental_electric(
 ) -> None:
     """A configured price sensor with LTS yields energy x price cost stats."""
     mock_config_entry.add_to_hass(hass)
+    register_carriers(hass)
     _set_cost_entities(hass, mock_config_entry, {"123": "sensor.price"})
     reading_ts = next(iter(mock_api_with_meters.get_energy_usage.return_value["data"]))
     stats_store.seed("sensor.price", [{"start": reading_ts, "mean": 0.10}])
@@ -175,10 +183,9 @@ async def test_cost_incremental_electric(
     await hass.async_block_till_done()
 
     assert coordinator.last_update_success is True
-    metadata, statistics = _call_for(
-        stats_store, "duke_energy:electric_123_energy_cost"
-    )
-    assert metadata["name"] == "Duke Energy Electric 123 Cost"
+    metadata, statistics = _call_for(stats_store, ELECTRIC_COST_ID)
+    assert metadata["source"] == "recorder"
+    assert metadata["name"] is None
     assert metadata["has_sum"] is True
     assert metadata["mean_type"] == StatisticMeanType.NONE
     assert metadata["unit_of_measurement"] == (hass.config.currency or "USD")
@@ -197,6 +204,7 @@ async def test_cost_incremental_continues_sum(
 ) -> None:
     """Cost resumes its running sum from the existing cost stat baseline."""
     mock_config_entry.add_to_hass(hass)
+    register_carriers(hass)
     _set_cost_entities(hass, mock_config_entry, {"123": "sensor.price"})
     base = next(iter(mock_api_with_meters.get_energy_usage.return_value["data"]))
     t1 = base - timedelta(hours=1)
@@ -214,7 +222,7 @@ async def test_cost_incremental_continues_sum(
     )
     # t1 was already priced in a prior run (sum 0.10); t2 is new.
     stats_store.seed(
-        "duke_energy:electric_123_energy_cost",
+        ELECTRIC_COST_ID,
         [{"start": t1, "state": 0.10, "sum": 0.10}],
     )
 
@@ -223,7 +231,7 @@ async def test_cost_incremental_continues_sum(
     await hass.async_block_till_done()
 
     assert coordinator.last_update_success is True
-    cost_rows = stats_store.data["duke_energy:electric_123_energy_cost"]
+    cost_rows = stats_store.data[ELECTRIC_COST_ID]
     # t1 kept its baseline; t2 accumulates onto it (0.10 -> 0.20).
     assert [r["sum"] for r in cost_rows] == pytest.approx([0.10, 0.20])
 
@@ -240,6 +248,7 @@ async def test_cost_unpriced_interval_omitted(
     a known price, so an interval preceding all price history is omitted.
     """
     mock_config_entry.add_to_hass(hass)
+    register_carriers(hass)
     _set_cost_entities(hass, mock_config_entry, {"123": "sensor.price"})
     reading_ts = next(iter(mock_api_with_meters.get_energy_usage.return_value["data"]))
     # Price exists in the queried window but only AFTER the reading's hour.
@@ -252,7 +261,7 @@ async def test_cost_unpriced_interval_omitted(
     await hass.async_block_till_done()
 
     assert coordinator.last_update_success is True
-    _, statistics = _call_for(stats_store, "duke_energy:electric_123_energy_cost")
+    _, statistics = _call_for(stats_store, ELECTRIC_COST_ID)
     assert statistics == []
 
 
@@ -268,6 +277,7 @@ async def test_cost_gap_carried_forward(
     metering: rates change irregularly, so the last known price still applies.
     """
     mock_config_entry.add_to_hass(hass)
+    register_carriers(hass)
     _set_cost_entities(hass, mock_config_entry, {"123": "sensor.price"})
     base = next(iter(mock_api_with_meters.get_energy_usage.return_value["data"]))
     t1 = base - timedelta(hours=1)
@@ -287,7 +297,7 @@ async def test_cost_gap_carried_forward(
     await hass.async_block_till_done()
 
     assert coordinator.last_update_success is True
-    _, statistics = _call_for(stats_store, "duke_energy:electric_123_energy_cost")
+    _, statistics = _call_for(stats_store, ELECTRIC_COST_ID)
     assert [s["state"] for s in statistics] == pytest.approx([0.10, 0.20])
     assert [s["sum"] for s in statistics] == pytest.approx([0.10, 0.30])
 
@@ -300,6 +310,7 @@ async def test_cost_current_state_fallback(
 ) -> None:
     """With no LTS, cost is priced at the sensor's current numeric state."""
     mock_config_entry.add_to_hass(hass)
+    register_carriers(hass)
     _set_cost_entities(hass, mock_config_entry, {"123": "sensor.price"})
     hass.states.async_set("sensor.price", "0.20")
     # No LTS seeded for sensor.price -> fallback to current state.
@@ -309,7 +320,7 @@ async def test_cost_current_state_fallback(
     await hass.async_block_till_done()
 
     assert coordinator.last_update_success is True
-    _, statistics = _call_for(stats_store, "duke_energy:electric_123_energy_cost")
+    _, statistics = _call_for(stats_store, ELECTRIC_COST_ID)
     assert len(statistics) == 1
     assert statistics[0]["state"] == pytest.approx(0.26)  # 1.3 kWh x $0.20
 
@@ -322,6 +333,7 @@ async def test_cost_gas_daily(
 ) -> None:
     """Gas cost prices the daily reading by its Eastern calendar day."""
     mock_config_entry.add_to_hass(hass)
+    register_carriers(hass, service_type="GAS", serial="456", src_acct_id="src-2")
     _set_cost_entities(hass, mock_config_entry, {"456": "sensor.gas_price"})
 
     # Fix the reading to an Eastern-midnight day so day bucketing is unambiguous.
@@ -343,7 +355,7 @@ async def test_cost_gas_daily(
     await hass.async_block_till_done()
 
     assert coordinator.last_update_success is True
-    _, statistics = _call_for(stats_store, "duke_energy:gas_456_energy_cost")
+    _, statistics = _call_for(stats_store, GAS_COST_ID)
     assert len(statistics) == 1
     # Cost is registered at noon (matching daily consumption), 2.5 CCF × $0.50.
     assert statistics[0]["start"] == reading + timedelta(hours=12)
@@ -359,6 +371,7 @@ async def test_cost_backfill_electric(
 ) -> None:
     """Backfill reprices the full consumption history and resets the flag."""
     mock_config_entry.add_to_hass(hass)
+    register_carriers(hass)
     _set_cost_entities(hass, mock_config_entry, {"123": "sensor.price"}, backfill=True)
 
     reading_ts = next(iter(mock_api_with_meters.get_energy_usage.return_value["data"]))
@@ -366,7 +379,7 @@ async def test_cost_backfill_electric(
     t1 = reading_ts - timedelta(hours=2)
     # Pre-existing consumption history (as if written by prior runs).
     stats_store.seed(
-        "duke_energy:electric_123_energy_consumption",
+        ELECTRIC_CONSUMPTION_ID,
         [
             {"start": t0, "state": 1.0, "sum": 1.0},
             {"start": t1, "state": 1.0, "sum": 2.0},
@@ -387,7 +400,7 @@ async def test_cost_backfill_electric(
     await hass.async_block_till_done()
 
     assert coordinator.last_update_success is True
-    cost_rows = stats_store.data["duke_energy:electric_123_energy_cost"]
+    cost_rows = stats_store.data[ELECTRIC_COST_ID]
     # Full history repriced: t0 via earliest price, cumulative sum from zero.
     assert [r["state"] for r in cost_rows] == pytest.approx([0.10, 0.10, 0.13])
     assert [r["sum"] for r in cost_rows] == pytest.approx([0.10, 0.20, 0.33])
@@ -409,13 +422,14 @@ async def test_cost_backfill_mid_gap_uses_previous_price(
     earliest_price remains reserved for pre-history (head) intervals only.
     """
     mock_config_entry.add_to_hass(hass)
+    register_carriers(hass)
     _set_cost_entities(hass, mock_config_entry, {"123": "sensor.price"}, backfill=True)
 
     reading_ts = next(iter(mock_api_with_meters.get_energy_usage.return_value["data"]))
     t0 = reading_ts - timedelta(hours=2)
     t1 = reading_ts - timedelta(hours=1)
     stats_store.seed(
-        "duke_energy:electric_123_energy_consumption",
+        ELECTRIC_CONSUMPTION_ID,
         [
             {"start": t0, "state": 1.0, "sum": 1.0},
             {"start": t1, "state": 1.0, "sum": 2.0},
@@ -436,7 +450,7 @@ async def test_cost_backfill_mid_gap_uses_previous_price(
     await hass.async_block_till_done()
 
     assert coordinator.last_update_success is True
-    cost_rows = stats_store.data["duke_energy:electric_123_energy_cost"]
+    cost_rows = stats_store.data[ELECTRIC_COST_ID]
     # reading_ts priced at 0.30 (carried forward), NOT 0.10 (earliest).
     assert [r["state"] for r in cost_rows] == pytest.approx([0.10, 0.30, 0.30])
     assert [r["sum"] for r in cost_rows] == pytest.approx([0.10, 0.40, 0.70])
@@ -450,6 +464,7 @@ async def test_cost_static_incremental(
 ) -> None:
     """A static mode meter prices every interval at its fixed rate."""
     mock_config_entry.add_to_hass(hass)
+    register_carriers(hass)
     _set_cost_meters(
         hass, mock_config_entry, {"123": {"mode": "static", "price": 0.15}}
     )
@@ -460,7 +475,7 @@ async def test_cost_static_incremental(
     await hass.async_block_till_done()
 
     assert coordinator.last_update_success is True
-    _, statistics = _call_for(stats_store, "duke_energy:electric_123_energy_cost")
+    _, statistics = _call_for(stats_store, ELECTRIC_COST_ID)
     assert len(statistics) == 1
     assert statistics[0]["start"] == reading_ts
     assert statistics[0]["state"] == pytest.approx(0.195)  # 1.3 kWh x $0.15
@@ -475,6 +490,7 @@ async def test_cost_static_backfill(
 ) -> None:
     """Static backfill reprices the full history flat, contiguous from zero."""
     mock_config_entry.add_to_hass(hass)
+    register_carriers(hass)
     _set_cost_meters(
         hass,
         mock_config_entry,
@@ -485,7 +501,7 @@ async def test_cost_static_backfill(
     t0 = reading_ts - timedelta(hours=2)
     t1 = reading_ts - timedelta(hours=1)
     stats_store.seed(
-        "duke_energy:electric_123_energy_consumption",
+        ELECTRIC_CONSUMPTION_ID,
         [
             {"start": t0, "state": 1.0, "sum": 1.0},
             {"start": t1, "state": 2.0, "sum": 3.0},
@@ -498,7 +514,7 @@ async def test_cost_static_backfill(
     await hass.async_block_till_done()
 
     assert coordinator.last_update_success is True
-    cost_rows = stats_store.data["duke_energy:electric_123_energy_cost"]
+    cost_rows = stats_store.data[ELECTRIC_COST_ID]
     # Every interval priced at the flat 0.20, cumulative sum from zero.
     assert [r["state"] for r in cost_rows] == pytest.approx([0.20, 0.40, 0.30])
     assert [r["sum"] for r in cost_rows] == pytest.approx([0.20, 0.60, 0.90])
@@ -513,6 +529,7 @@ async def test_cost_mode_off_skips(
 ) -> None:
     """A meter explicitly set to off records no cost statistic."""
     mock_config_entry.add_to_hass(hass)
+    register_carriers(hass)
     _set_cost_meters(hass, mock_config_entry, {"123": {"mode": "off"}})
 
     coordinator = DukeEnergyCoordinator(hass, mock_api_with_meters, mock_config_entry)
@@ -520,4 +537,55 @@ async def test_cost_mode_off_skips(
     await hass.async_block_till_done()
 
     assert coordinator.last_update_success is True
-    assert "duke_energy:electric_123_energy_cost" not in stats_store.data
+    assert ELECTRIC_COST_ID not in stats_store.data
+
+
+async def test_cost_enabled_without_carrier_skips(
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+    mock_api_with_meters: AsyncMock,
+    stats_store: StatsStore,
+) -> None:
+    """An enabled cost mode whose carrier entity is missing skips cost only.
+
+    The gate and the entity can only diverge when cost was enabled without
+    the accompanying reload; consumption must still ingest normally.
+    """
+    mock_config_entry.add_to_hass(hass)
+    register_carriers(hass, cost=False)
+    _set_cost_meters(hass, mock_config_entry, {"123": {"mode": "static", "price": 0.15}})
+
+    coordinator = DukeEnergyCoordinator(hass, mock_api_with_meters, mock_config_entry)
+    await coordinator.async_refresh()
+    await hass.async_block_till_done()
+
+    assert coordinator.last_update_success is True
+    assert ELECTRIC_CONSUMPTION_ID in stats_store.data
+    assert ELECTRIC_COST_ID not in stats_store.data
+
+
+async def test_meter_without_carrier_entities_skipped(
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+    mock_api_with_meters: AsyncMock,
+    stats_store: StatsStore,
+) -> None:
+    """A meter with no carrier entities (e.g. new at Duke) writes no statistics.
+
+    Its entities are only created at platform setup, so the meter is skipped
+    until the next reload — without failing the poll or fetching usage.
+    """
+    mock_config_entry.add_to_hass(hass)
+    # No carriers registered at all.
+
+    coordinator = DukeEnergyCoordinator(hass, mock_api_with_meters, mock_config_entry)
+    await coordinator.async_refresh()
+    await hass.async_block_till_done()
+
+    assert coordinator.last_update_success is True
+    assert stats_store.data == {}
+    # Only the MONTHLY billing-cycle lookup ran; no usage windows were fetched.
+    intervals = {
+        call.args[1] for call in mock_api_with_meters.get_energy_usage.await_args_list
+    }
+    assert intervals <= {"MONTHLY"}

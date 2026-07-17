@@ -134,7 +134,7 @@ async def test_abort_if_already_configured(
         domain=DOMAIN,
         unique_id="test-user-id",
         title="test@example.com",
-        version=2,
+        version=3,
         minor_version=1,
         data=_make_oauth_data(),
     )
@@ -171,7 +171,7 @@ async def test_reauth_success(
         domain=DOMAIN,
         unique_id="test-user-id",
         title="test@example.com",
-        version=2,
+        version=3,
         minor_version=1,
         data=_make_oauth_data(),
     )
@@ -242,7 +242,7 @@ def _entry_with_meters(hass: HomeAssistant, meters: dict) -> MockConfigEntry:
         domain=DOMAIN,
         unique_id="test-user-id",
         title="test@example.com",
-        version=2,
+        version=3,
         minor_version=1,
         data=_make_oauth_data(),
     )
@@ -270,13 +270,22 @@ async def _configure_meter(hass: HomeAssistant, flow_id: str, user_input: dict) 
     return await hass.config_entries.options.async_configure(flow_id, user_input)
 
 
-async def _save(hass: HomeAssistant, flow_id: str, *, backfill: bool = False) -> dict:
-    """Pick Save from the menu and submit the save sub-step."""
+async def _save(
+    hass: HomeAssistant, flow_id: str, *, backfill: bool = False
+) -> tuple[dict, Mock]:
+    """Pick Save from the menu and submit the save sub-step.
+
+    ``async_schedule_reload`` is patched during the submit — saving a changed
+    configuration legitimately schedules a reload, which must not actually
+    run against these mock entries — and returned for call assertions.
+    """
     result = await _menu_select(hass, flow_id, "save")
     assert result["step_id"] == "save"
-    return await hass.config_entries.options.async_configure(
-        result["flow_id"], {"backfill_cost": backfill}
-    )
+    with patch.object(hass.config_entries, "async_schedule_reload") as mock_reload:
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], {"backfill_cost": backfill}
+        )
+    return result, mock_reload
 
 
 async def test_options_flow_saves_sensor_mode(
@@ -301,13 +310,16 @@ async def test_options_flow_saves_sensor_mode(
         )
         # Returns to the menu; now save.
         assert result["step_id"] == "init"
-        result = await _save(hass, result["flow_id"])
+        result, mock_reload = await _save(hass, result["flow_id"])
 
     assert result["type"] is FlowResultType.CREATE_ENTRY
     assert entry.options["cost_meters"] == {
         "123": {"mode": "sensor", "entity_id": "sensor.price"}
     }
     assert entry.options["backfill_cost"] is False
+    # The per-meter configuration changed, so a reload was scheduled to
+    # (re)create the cost carrier entities.
+    mock_reload.assert_called_once_with(entry.entry_id)
 
 
 async def test_options_flow_saves_static_mode(
@@ -324,12 +336,13 @@ async def test_options_flow_saves_static_mode(
         hass, result["flow_id"], {"mode": "static", "price": 0.1874}
     )
     assert result["step_id"] == "init"
-    result = await _save(hass, result["flow_id"])
+    result, mock_reload = await _save(hass, result["flow_id"])
 
     assert result["type"] is FlowResultType.CREATE_ENTRY
     assert entry.options["cost_meters"] == {
         "123": {"mode": "static", "price": 0.1874}
     }
+    mock_reload.assert_called_once_with(entry.entry_id)
 
 
 async def test_options_flow_off_mode(
@@ -343,7 +356,7 @@ async def test_options_flow_off_mode(
     result = await hass.config_entries.options.async_init(entry.entry_id)
     result = await _menu_select(hass, result["flow_id"], "123")
     result = await _configure_meter(hass, result["flow_id"], {"mode": "off"})
-    result = await _save(hass, result["flow_id"])
+    result, _ = await _save(hass, result["flow_id"])
 
     assert result["type"] is FlowResultType.CREATE_ENTRY
     assert entry.options["cost_meters"] == {"123": {"mode": "off"}}
@@ -422,7 +435,7 @@ async def test_options_flow_state_only_entity_allowed(
             result["flow_id"],
             {"mode": "sensor", "entity_id": "sensor.price"},
         )
-        result = await _save(hass, result["flow_id"])
+        result, _ = await _save(hass, result["flow_id"])
 
     assert result["type"] is FlowResultType.CREATE_ENTRY
     assert entry.options["cost_meters"] == {
@@ -435,22 +448,43 @@ async def test_options_flow_backfill_schedules_reload(
     enable_custom_integrations: object,
     hass: HomeAssistant,
 ) -> None:
-    """Enabling backfill schedules a reload; leaving it off does not."""
+    """Enabling backfill schedules a reload even with unchanged meter config."""
     entry = _entry_with_meters(hass, _ELECTRIC_METER)
+    # Pre-existing, unchanged configuration: only backfill forces the reload.
+    hass.config_entries.async_update_entry(
+        entry,
+        options={
+            "cost_meters": {"123": {"mode": "sensor", "entity_id": "sensor.price"}},
+            "backfill_cost": False,
+        },
+    )
 
-    with (
-        _patch_price_validation(has_lts=True),
-        patch.object(hass.config_entries, "async_schedule_reload") as mock_reload,
-    ):
-        result = await hass.config_entries.options.async_init(entry.entry_id)
-        result = await _menu_select(hass, result["flow_id"], "123")
-        result = await _configure_meter(
-            hass,
-            result["flow_id"],
-            {"mode": "sensor", "entity_id": "sensor.price"},
-        )
-        result = await _save(hass, result["flow_id"], backfill=True)
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    result, mock_reload = await _save(hass, result["flow_id"], backfill=True)
 
     assert result["type"] is FlowResultType.CREATE_ENTRY
     assert entry.options["backfill_cost"] is True
     mock_reload.assert_called_once_with(entry.entry_id)
+
+
+async def test_options_flow_unchanged_save_skips_reload(
+    recorder_mock: object,
+    enable_custom_integrations: object,
+    hass: HomeAssistant,
+) -> None:
+    """Saving without changing anything (and no backfill) schedules no reload."""
+    entry = _entry_with_meters(hass, _ELECTRIC_METER)
+    hass.config_entries.async_update_entry(
+        entry,
+        options={
+            "cost_meters": {"123": {"mode": "static", "price": 0.15}},
+            "backfill_cost": False,
+        },
+    )
+
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    result, mock_reload = await _save(hass, result["flow_id"])
+
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert entry.options["cost_meters"] == {"123": {"mode": "static", "price": 0.15}}
+    mock_reload.assert_not_called()

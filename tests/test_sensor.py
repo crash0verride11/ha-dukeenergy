@@ -178,7 +178,7 @@ async def test_billing_failure_keeps_poll_working(
 
     coordinator = mock_config_entry.runtime_data
     assert coordinator.last_update_success is True
-    assert "duke_energy:electric_123_energy_consumption" in stats_store.data
+    assert "sensor.duke_electric_123_energy_consumption" in stats_store.data
 
     balance = hass.states.get(
         _account_eid(hass, mock_config_entry, "src-1", "bill_balance")
@@ -355,7 +355,7 @@ async def test_summary_failure_keeps_poll_working(
 
     coordinator = mock_config_entry.runtime_data
     assert coordinator.last_update_success is True
-    assert "duke_energy:electric_123_energy_consumption" in stats_store.data
+    assert "sensor.duke_electric_123_energy_consumption" in stats_store.data
 
     usage_id = _meter_eid(hass, mock_config_entry, "123", "usage_this_bill_cycle")
     cost_id = _account_eid(hass, mock_config_entry, "src-1", "cost_last_bill_cycle")
@@ -437,6 +437,107 @@ async def test_diagnostic_sensors_stay_available_on_failed_poll(
     assert coordinator.last_update_success is False
     for entity_id in (poll_id, change_id):
         assert hass.states.get(entity_id).state != "unavailable"
+
+
+async def test_carrier_entities(
+    recorder_mock: object,
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+    mock_api_with_meters: AsyncMock,
+    stats_store: StatsStore,
+    auto_enable_custom_integrations: None,
+) -> None:
+    """Carriers exist with pinned ids, unknown state, and statistics keyed to them."""
+    mock_config_entry.add_to_hass(hass)
+    await _setup_entry(hass, mock_config_entry)
+
+    registry = er.async_get(hass)
+    device_registry = dr.async_get(hass)
+    meter_device = device_registry.async_get_device(identifiers={(DOMAIN, "123")})
+    account_device = device_registry.async_get_device(
+        identifiers={(DOMAIN, "account_src-1")}
+    )
+
+    # The initial entity id is the slugified portable unique id, so the
+    # statistic id comes out exactly as designed.
+    consumption_id = "sensor.duke_electric_123_energy_consumption"
+    temperature_id = "sensor.duke_account_src_1_temperature"
+    assert _eid(hass, "duke_electric_123_energy_consumption") == consumption_id
+    assert _eid(hass, "duke_account_src-1_temperature") == temperature_id
+    assert registry.async_get(consumption_id).device_id == meter_device.id
+    assert registry.async_get(temperature_id).device_id == account_device.id
+
+    # Permanently unknown, yet fully described: the state must never turn
+    # numeric (the recorder would compile competing rows) or unavailable.
+    consumption = hass.states.get(consumption_id)
+    assert consumption.state == STATE_UNKNOWN
+    assert consumption.attributes["state_class"] == "total"
+    assert consumption.attributes["unit_of_measurement"] == (
+        UnitOfEnergy.KILO_WATT_HOUR
+    )
+    temperature = hass.states.get(temperature_id)
+    assert temperature.state == STATE_UNKNOWN
+    assert temperature.attributes["state_class"] == "measurement"
+
+    # The first refresh imported statistics under the carriers' entity ids.
+    assert consumption_id in stats_store.data
+    assert temperature_id in stats_store.data
+
+    # No cost mode configured -> no cost carrier.
+    assert (
+        er.async_get(hass).async_get_entity_id(
+            "sensor", DOMAIN, "duke_electric_123_total_cost"
+        )
+        is None
+    )
+
+
+async def test_cost_carrier_gated_by_mode(
+    recorder_mock: object,
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+    mock_api_with_meters: AsyncMock,
+    stats_store: StatsStore,
+    auto_enable_custom_integrations: None,
+) -> None:
+    """An enabled cost mode creates the cost carrier and its statistics."""
+    mock_config_entry.add_to_hass(hass)
+    hass.config_entries.async_update_entry(
+        mock_config_entry,
+        options={
+            "cost_meters": {"123": {"mode": "static", "price": 0.15}},
+            "backfill_cost": False,
+        },
+    )
+    await _setup_entry(hass, mock_config_entry)
+
+    cost_id = _eid(hass, "duke_electric_123_total_cost")
+    assert cost_id == "sensor.duke_electric_123_total_cost"
+    assert hass.states.get(cost_id).state == STATE_UNKNOWN
+    assert cost_id in stats_store.data
+
+
+async def test_carriers_stay_available_on_failed_poll(
+    recorder_mock: object,
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+    mock_api_with_meters: AsyncMock,
+    stats_store: StatsStore,
+    auto_enable_custom_integrations: None,
+) -> None:
+    """Carriers read as 'no live data', never 'broken', across failed polls."""
+    mock_config_entry.add_to_hass(hass)
+    await _setup_entry(hass, mock_config_entry)
+    consumption_id = "sensor.duke_electric_123_energy_consumption"
+
+    coordinator = mock_config_entry.runtime_data
+    mock_api_with_meters.get_meters.side_effect = TimeoutError
+    coordinator._last_successful_date = None  # force a real poll
+    await coordinator.async_refresh()
+    await hass.async_block_till_done()
+
+    assert coordinator.last_update_success is False
+    assert hass.states.get(consumption_id).state == STATE_UNKNOWN
 
 
 async def test_unload_entry(

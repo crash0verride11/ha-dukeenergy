@@ -10,8 +10,15 @@ from unittest.mock import DEFAULT, AsyncMock, Mock, patch
 
 import pytest
 
-from custom_components.duke_energy.const import DOMAIN
-from homeassistant.util import dt as dt_util
+from custom_components.duke_energy.const import (
+    DOMAIN,
+    consumption_unique_id,
+    cost_unique_id,
+    temperature_unique_id,
+)
+from homeassistant.core import HomeAssistant
+from homeassistant.helpers import entity_registry as er
+from homeassistant.util import dt as dt_util, slugify
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 
@@ -77,7 +84,7 @@ def mock_config_entry() -> MockConfigEntry:
         domain=DOMAIN,
         unique_id="test-user-id",
         title="test@example.com",
-        version=2,
+        version=3,
         minor_version=1,
         data={
             "auth_implementation": DOMAIN,
@@ -118,11 +125,41 @@ def mock_recorder() -> Generator[Mock]:
             return_value=recorder_instance,
         ),
         patch(
-            "custom_components.duke_energy.coordinator.async_add_external_statistics",
+            "custom_components.duke_energy.coordinator.async_import_statistics",
         ) as mock_add_stats,
     ):
         recorder_instance.mock_add_stats = mock_add_stats
         yield recorder_instance
+
+
+def register_carriers(
+    hass: HomeAssistant,
+    *,
+    service_type: str = "ELECTRIC",
+    serial: str = "123",
+    src_acct_id: str = "src-1",
+    cost: bool = True,
+) -> dict[str, str]:
+    """Register statistics-carrier entities as the sensor platform would.
+
+    Coordinator-level tests never forward the sensor platform, but the
+    coordinator resolves its statistic ids from the entity registry — so the
+    carrier registry rows are created directly. Returns the entity ids
+    (== statistic ids) keyed by kind.
+    """
+    registry = er.async_get(hass)
+    unique_ids = {
+        "consumption": consumption_unique_id(service_type, serial),
+        "temperature": temperature_unique_id(src_acct_id),
+    }
+    if cost:
+        unique_ids["cost"] = cost_unique_id(service_type, serial)
+    return {
+        kind: registry.async_get_or_create(
+            "sensor", DOMAIN, unique_id, suggested_object_id=slugify(unique_id)
+        ).entity_id
+        for kind, unique_id in unique_ids.items()
+    }
 
 
 def _to_epoch(value: object) -> float:
@@ -135,7 +172,7 @@ def _to_epoch(value: object) -> float:
 class StatsStore:
     """In-memory stand-in for the recorder's statistics tables.
 
-    Records what the coordinator inserts via ``async_add_external_statistics``
+    Records what the coordinator inserts via ``async_import_statistics``
     and answers ``get_last_statistics`` / ``statistics_during_period`` from it,
     so tests exercise the real read-modify-write flow (sum baselines, backfill
     read-back, price lookups) without a recorder process. Row ``start`` values
@@ -230,7 +267,7 @@ def stats_store() -> Generator[StatsStore]:
             return_value=recorder_instance,
         ),
         patch(
-            "custom_components.duke_energy.coordinator.async_add_external_statistics",
+            "custom_components.duke_energy.coordinator.async_import_statistics",
             side_effect=store.add_external,
         ) as mock_add,
         patch(
