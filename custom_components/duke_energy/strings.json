@@ -76,6 +76,15 @@
   },
   "entity": {
     "sensor": {
+      "energy_consumption": {
+        "name": "Consumption"
+      },
+      "total_cost": {
+        "name": "Cost"
+      },
+      "temperature": {
+        "name": "Temperature"
+      },
       "last_duke_poll": {
         "name": "Last updated"
       },

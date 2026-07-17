@@ -43,7 +43,7 @@ class DukeEnergyOAuth2FlowHandler(
 ):
     """Handle a config flow for Duke Energy."""
 
-    VERSION = 2
+    VERSION = 3
     MINOR_VERSION = 1
 
     DOMAIN = DOMAIN
@@ -274,12 +274,16 @@ class DukeEnergyOptionsFlow(OptionsFlow):
         """Persist the per-meter configuration and optionally backfill."""
         if user_input is not None:
             backfill = user_input.get("backfill_cost", False)
-            # Only reload when backfill is requested; otherwise the coordinator
-            # picks up the new configuration at its next scheduled poll. A reload
-            # (not async_request_refresh) is required because a fresh coordinator
-            # resets _last_successful_date, bypassing the "already retrieved
-            # today" guard that would otherwise defer the backfill.
-            if backfill:
+            # Reload when the per-meter configuration changed: cost carrier
+            # entities are created and removed at platform setup from the
+            # saved modes, so a mode change needs a reload to apply. Backfill
+            # also needs one (and only ever runs by request, via this
+            # checkbox): a reload (not async_request_refresh) gives a fresh
+            # coordinator whose reset _last_successful_date bypasses the
+            # "already retrieved today" guard that would otherwise defer it.
+            if backfill or self._cost_meters != self.config_entry.options.get(
+                "cost_meters", {}
+            ):
                 self.hass.config_entries.async_schedule_reload(
                     self.config_entry.entry_id
                 )

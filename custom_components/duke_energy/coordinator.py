@@ -11,6 +11,9 @@ from typing import Any, cast
 from aiodukeenergy_co import DukeEnergy, DukeEnergyAuthError
 from aiohttp import ClientError
 from homeassistant.components.recorder import (
+    DOMAIN as RECORDER_DOMAIN,
+)
+from homeassistant.components.recorder import (
     get_instance,  # pyright: ignore[reportPrivateImportUsage]
 )
 from homeassistant.components.recorder.models import (
@@ -19,7 +22,7 @@ from homeassistant.components.recorder.models import (
     StatisticMetaData,
 )
 from homeassistant.components.recorder.statistics import (
-    async_add_external_statistics,
+    async_import_statistics,
     get_last_statistics,
     statistics_during_period,
 )
@@ -32,13 +35,20 @@ from homeassistant.const import (
     UnitOfVolume,
 )
 from homeassistant.core import HomeAssistant, callback
-from homeassistant.exceptions import ConfigEntryAuthFailed
+from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.event import async_track_point_in_time
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from homeassistant.util import dt as dt_util
 from homeassistant.util.unit_conversion import EnergyConverter
 
-from .const import DOMAIN
+from .const import (
+    COST_ENABLED_MODES,
+    DOMAIN,
+    consumption_unique_id,
+    cost_unique_id,
+    temperature_unique_id,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -171,13 +181,59 @@ class DukeEnergyCoordinator(DataUpdateCoordinator[None]):
         Cancel any pending scheduled update.
 
         Statistics are intentionally NOT cleared here. Unload runs on every
-        reload and restart, so wiping the external statistics would discard all
+        reload and restart, so wiping the imported statistics would discard all
         history. History is cleared only when the config entry is removed (see
         async_remove_entry).
         """
         if self._unsub_scheduled is not None:
             self._unsub_scheduled()
             self._unsub_scheduled = None
+
+    async def async_load_meters(self) -> None:
+        """
+        Populate each supported meter's identity before platform setup.
+
+        The sensor platform enumerates ``meter_info`` to create devices and
+        the statistics carriers, and statistics are imported under the
+        carriers' entity ids — so identity must be known before the first
+        refresh runs. Called from async_setup_entry, before the platform
+        forward and the first refresh.
+        """
+        try:
+            meters: dict[str, dict[str, Any]] = await self.api.get_meters()
+        except DukeEnergyAuthError as err:
+            raise ConfigEntryAuthFailed from err
+        except (TimeoutError, ClientError) as err:
+            msg = "Could not fetch Duke Energy meters"
+            raise ConfigEntryNotReady(msg) from err
+        for serial_number, meter in meters.items():
+            if self._is_supported(meter):
+                self._register_meter(serial_number, meter)
+
+    @staticmethod
+    def _is_supported(meter: dict[str, Any]) -> bool:
+        """Return whether the meter is a supported electric or gas meter."""
+        return (
+            isinstance(meter["serviceType"], str)
+            and meter["serviceType"] in _SUPPORTED_METER_TYPES
+        )
+
+    def _register_meter(self, serial_number: str, meter: dict[str, Any]) -> None:
+        """Record a supported meter's identity for the sensor platform."""
+        src_acct_id = meter["account"]["srcAcctId"]
+        self.meter_info[serial_number] = MeterInfo(meter["serviceType"], src_acct_id)
+        self.account_info[src_acct_id] = meter["account"]["accountNumber"]
+
+    def _resolve_statistic_id(self, unique_id: str) -> str | None:
+        """
+        Return the entity id of the statistics carrier with this unique id.
+
+        The entity id IS the statistic id the imported statistics are keyed
+        to. None means the carrier does not exist (yet) — e.g. a meter that
+        appeared at Duke Energy after setup, whose entities are only created
+        on the next reload.
+        """
+        return er.async_get(self.hass).async_get_entity_id("sensor", DOMAIN, unique_id)
 
     def _get_or_create_daily_offset(self, day: date) -> timedelta:
         """
@@ -266,28 +322,30 @@ class DukeEnergyCoordinator(DataUpdateCoordinator[None]):
                 raise ConfigEntryAuthFailed from err
 
             for serial_number, meter in meters.items():
-                if (
-                    not isinstance(meter["serviceType"], str)
-                    or meter["serviceType"] not in _SUPPORTED_METER_TYPES
-                ):
+                if not self._is_supported(meter):
                     _LOGGER.debug(
                         "Skipping unsupported meter type %s", meter["serviceType"]
                     )
                     continue
 
                 src_acct_id = meter["account"]["srcAcctId"]
-                self.meter_info[serial_number] = MeterInfo(
-                    meter["serviceType"], src_acct_id
-                )
-                self.account_info[src_acct_id] = meter["account"]["accountNumber"]
+                self._register_meter(serial_number, meter)
                 # Before the statistics work: its early `continue`s must not
                 # skip the bill-cycle summary refresh.
                 await self._async_update_monthly_usage(
                     serial_number, src_acct_id, monthly_accounts_seen, bill_cycle_starts
                 )
 
-                id_prefix = f"{meter['serviceType'].lower()}_{serial_number}"
-                consumption_statistic_id = f"{DOMAIN}:{id_prefix}_energy_consumption"
+                consumption_statistic_id = self._resolve_statistic_id(
+                    consumption_unique_id(meter["serviceType"], serial_number)
+                )
+                if consumption_statistic_id is None:
+                    _LOGGER.info(
+                        "Meter %s has no consumption entity yet; reload the "
+                        "integration to create it",
+                        serial_number,
+                    )
+                    continue
                 self._statistic_ids.add(consumption_statistic_id)
                 supported_meter_count += 1
                 _LOGGER.debug(
@@ -352,14 +410,12 @@ class DukeEnergyCoordinator(DataUpdateCoordinator[None]):
                         )
                     )
 
-                name_prefix = (
-                    f"Duke Energy {meter['serviceType'].capitalize()} {serial_number}"
-                )
+                # name=None: the statistic takes the carrier entity's name.
                 consumption_metadata = StatisticMetaData(
                     mean_type=StatisticMeanType.NONE,
                     has_sum=True,
-                    name=f"{name_prefix} Consumption",
-                    source=DOMAIN,
+                    name=None,
+                    source=RECORDER_DOMAIN,
                     statistic_id=consumption_statistic_id,
                     unit_class=EnergyConverter.UNIT_CLASS
                     if meter["serviceType"] == "ELECTRIC"
@@ -374,7 +430,7 @@ class DukeEnergyCoordinator(DataUpdateCoordinator[None]):
                     len(consumption_statistics),
                     consumption_statistic_id,
                 )
-                async_add_external_statistics(
+                async_import_statistics(
                     self.hass, consumption_metadata, consumption_statistics
                 )
                 if consumption_statistics:
@@ -387,8 +443,9 @@ class DukeEnergyCoordinator(DataUpdateCoordinator[None]):
                 if cost_config:
                     await self._async_update_cost(
                         cost_config=cost_config,
-                        id_prefix=id_prefix,
-                        name_prefix=name_prefix,
+                        service_type=meter["serviceType"],
+                        serial_number=serial_number,
+                        consumption_statistic_id=consumption_statistic_id,
                         usage=usage,
                         interval=interval,
                         do_backfill=do_backfill,
@@ -400,7 +457,16 @@ class DukeEnergyCoordinator(DataUpdateCoordinator[None]):
                     continue
                 temp_accounts_seen.add(account_number)
 
-                temperature_statistic_id = f"{DOMAIN}:account_{src_acct_id}_temperature"
+                temperature_statistic_id = self._resolve_statistic_id(
+                    temperature_unique_id(src_acct_id)
+                )
+                if temperature_statistic_id is None:
+                    _LOGGER.info(
+                        "Account %s has no temperature entity yet; reload the "
+                        "integration to create it",
+                        src_acct_id,
+                    )
+                    continue
                 self._statistic_ids.add(temperature_statistic_id)
 
                 last_temp_stat = await get_instance(self.hass).async_add_executor_job(
@@ -438,8 +504,8 @@ class DukeEnergyCoordinator(DataUpdateCoordinator[None]):
                 temperature_metadata = StatisticMetaData(
                     mean_type=StatisticMeanType.ARITHMETIC,
                     has_sum=False,
-                    name=f"Duke Energy Account {src_acct_id} Temperature",
-                    source=DOMAIN,
+                    name=None,
+                    source=RECORDER_DOMAIN,
                     statistic_id=temperature_statistic_id,
                     unit_class="temperature",
                     unit_of_measurement=UnitOfTemperature.FAHRENHEIT,
@@ -450,7 +516,7 @@ class DukeEnergyCoordinator(DataUpdateCoordinator[None]):
                     len(temperature_statistics),
                     temperature_statistic_id,
                 )
-                async_add_external_statistics(
+                async_import_statistics(
                     self.hass, temperature_metadata, temperature_statistics
                 )
 
@@ -632,8 +698,9 @@ class DukeEnergyCoordinator(DataUpdateCoordinator[None]):
         self,
         *,
         cost_config: dict[str, Any],
-        id_prefix: str,
-        name_prefix: str,
+        service_type: str,
+        serial_number: str,
+        consumption_statistic_id: str,
         usage: dict[datetime, dict[str, float | int]],
         interval: str,
         do_backfill: bool,
@@ -646,9 +713,13 @@ class DukeEnergyCoordinator(DataUpdateCoordinator[None]):
         unconfigured meter) skips cost entirely, leaving existing cost
         statistics untouched. Backfill and incremental paths share the flat
         rate, so a static rate can also (re)price full history.
+
+        The mode gate matches the sensor platform's cost-carrier gate
+        (COST_ENABLED_MODES): an enabled mode implies the carrier entity was
+        created at setup, and its entity id keys the cost statistics.
         """
         mode = cost_config.get("mode")
-        if mode not in ("sensor", "static"):
+        if mode not in COST_ENABLED_MODES:
             return
         entity_id = cost_config.get("entity_id")
         static_price = cost_config.get("price") if mode == "static" else None
@@ -657,31 +728,42 @@ class DukeEnergyCoordinator(DataUpdateCoordinator[None]):
         if mode == "static" and static_price is None:
             return
 
+        cost_statistic_id = self._resolve_statistic_id(
+            cost_unique_id(service_type, serial_number)
+        )
+        if cost_statistic_id is None:
+            # Cost was enabled without a reload (or the carrier was deleted);
+            # the gate and the entity are out of step until the next reload.
+            _LOGGER.warning(
+                "Meter %s has no cost entity yet; reload the integration to create it",
+                serial_number,
+            )
+            return
+        self._statistic_ids.add(cost_statistic_id)
+
         if do_backfill:
             await self._async_backfill_cost(
                 entity_id=entity_id,
                 static_price=static_price,
-                id_prefix=id_prefix,
-                name_prefix=name_prefix,
+                cost_statistic_id=cost_statistic_id,
+                consumption_statistic_id=consumption_statistic_id,
                 interval=interval,
             )
         else:
             await self._async_add_cost_statistics(
                 entity_id=entity_id,
                 static_price=static_price,
-                id_prefix=id_prefix,
-                name_prefix=name_prefix,
+                cost_statistic_id=cost_statistic_id,
                 usage=usage,
                 interval=interval,
             )
 
-    async def _async_add_cost_statistics(  # noqa: PLR0913
+    async def _async_add_cost_statistics(
         self,
         *,
         entity_id: str | None,
         static_price: float | None,
-        id_prefix: str,
-        name_prefix: str,
+        cost_statistic_id: str,
         usage: dict[datetime, dict[str, float | int]],
         interval: str,
     ) -> None:
@@ -698,9 +780,6 @@ class DukeEnergyCoordinator(DataUpdateCoordinator[None]):
 
         For the full-history (re)price, see _async_backfill_cost.
         """
-        cost_statistic_id = f"{DOMAIN}:{id_prefix}_energy_cost"
-        self._statistic_ids.add(cost_statistic_id)
-
         if not usage:
             return
 
@@ -760,7 +839,6 @@ class DukeEnergyCoordinator(DataUpdateCoordinator[None]):
         )
         self._write_cost_statistics(
             cost_statistic_id=cost_statistic_id,
-            name_prefix=name_prefix,
             samples=samples,
             price_map=price_map,
             pre_history_price=pre_history_price,
@@ -772,7 +850,6 @@ class DukeEnergyCoordinator(DataUpdateCoordinator[None]):
         self,
         *,
         cost_statistic_id: str,
-        name_prefix: str,
         samples: Iterable[tuple[datetime, datetime, float]],
         price_map: _PriceMap,
         pre_history_price: float | None,
@@ -803,21 +880,20 @@ class DukeEnergyCoordinator(DataUpdateCoordinator[None]):
         _LOGGER.debug(
             "%s %s statistics for %s", log_verb, len(cost_statistics), cost_statistic_id
         )
-        async_add_external_statistics(
+        async_import_statistics(
             self.hass,
-            self._cost_metadata(cost_statistic_id, name_prefix),
+            self._cost_metadata(cost_statistic_id),
             cost_statistics,
         )
 
-    def _cost_metadata(
-        self, cost_statistic_id: str, name_prefix: str
-    ) -> StatisticMetaData:
+    def _cost_metadata(self, cost_statistic_id: str) -> StatisticMetaData:
         """Return the metadata for a meter's cost statistic."""
+        # name=None: the statistic takes the carrier entity's name.
         return StatisticMetaData(
             mean_type=StatisticMeanType.NONE,
             has_sum=True,
-            name=f"{name_prefix} Cost",
-            source=DOMAIN,
+            name=None,
+            source=RECORDER_DOMAIN,
             statistic_id=cost_statistic_id,
             unit_class=None,
             unit_of_measurement=self.hass.config.currency or "USD",
@@ -828,8 +904,8 @@ class DukeEnergyCoordinator(DataUpdateCoordinator[None]):
         *,
         entity_id: str | None,
         static_price: float | None,
-        id_prefix: str,
-        name_prefix: str,
+        cost_statistic_id: str,
+        consumption_statistic_id: str,
         interval: str,
     ) -> None:
         """
@@ -845,9 +921,6 @@ class DukeEnergyCoordinator(DataUpdateCoordinator[None]):
         The sum is rebuilt from zero across the whole series, overwriting any
         incremental cost rows.
         """
-        consumption_statistic_id = f"{DOMAIN}:{id_prefix}_energy_consumption"
-        cost_statistic_id = f"{DOMAIN}:{id_prefix}_energy_cost"
-
         # Read at hourly resolution so the stored starts come back exactly as
         # written (top-of-hour for electric, noon for gas) — a "day" period would
         # re-bucket gas to midnight and misalign it against the incremental path.
@@ -917,7 +990,6 @@ class DukeEnergyCoordinator(DataUpdateCoordinator[None]):
         )
         self._write_cost_statistics(
             cost_statistic_id=cost_statistic_id,
-            name_prefix=name_prefix,
             samples=samples,
             price_map=price_map,
             pre_history_price=earliest_price,

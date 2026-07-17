@@ -6,6 +6,7 @@ One account device per Duke Energy account, holding:
 - ``last_duke_poll`` ("Last updated"): when Duke Energy was last polled.
 - ``cost_last_bill_cycle`` / ``cost_last_year``: the account-wide bill
   amounts from the monthly usage summary.
+- The account's temperature statistics carrier (see below).
 
 One meter device per supported meter (linked to its account via_device),
 holding:
@@ -14,6 +15,16 @@ holding:
   were last written.
 - ``usage_this_bill_cycle`` / ``usage_last_bill_cycle`` / ``usage_last_year``:
   the meter's bill-cycle usage totals from the monthly usage summary.
+- The meter's consumption statistics carrier, and — when the meter's cost
+  mode is enabled — its cost statistics carrier.
+
+Statistics carriers hold a permanently ``unknown`` state: the coordinator
+imports Duke Energy's (batched, lagging) history as long-term statistics
+keyed to the carrier's entity id. The unknown state is load-bearing — the
+recorder skips entities with no numeric states when compiling statistics,
+so it never writes competing rows into the imported series, while
+``state_class`` and the unit remain exposed. Renaming a carrier's entity id
+migrates its statistics automatically.
 """
 
 from __future__ import annotations
@@ -27,13 +38,21 @@ from homeassistant.components.sensor import (
     SensorDeviceClass,
     SensorEntity,
     SensorEntityDescription,
+    SensorStateClass,
 )
-from homeassistant.const import UnitOfEnergy, UnitOfVolume
+from homeassistant.const import UnitOfEnergy, UnitOfTemperature, UnitOfVolume
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
+from homeassistant.util import slugify
 
-from .const import DOMAIN
+from .const import (
+    COST_ENABLED_MODES,
+    DOMAIN,
+    consumption_unique_id,
+    cost_unique_id,
+    temperature_unique_id,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -154,18 +173,23 @@ async def async_setup_entry(
     """
     Set up the account and meter sensors.
 
-    Meters are enumerated once from the coordinator's first refresh (which
-    completed before this platform was forwarded). Meters added later at
-    Duke Energy appear after a reload of the config entry. Account entities
-    are appended before their meters' so the account device exists when a
-    meter device references it via_device.
+    Meters are enumerated once from the coordinator's meter load (which
+    completed before this platform was forwarded — the statistics carriers
+    must exist before the first refresh imports statistics under their
+    entity ids). Meters added later at Duke Energy appear after a reload of
+    the config entry. Account entities are appended before their meters' so
+    the account device exists when a meter device references it via_device.
     """
     coordinator = entry.runtime_data
+    cost_meters: dict[str, dict[str, Any]] = entry.options.get("cost_meters", {})
     entities: list[SensorEntity] = []
     accounts_seen: set[str] = set()
     for serial_number, info in coordinator.meter_info.items():
         if info.src_acct_id not in accounts_seen:
             accounts_seen.add(info.src_acct_id)
+            entities.append(
+                DukeEnergyTemperatureCarrier(coordinator, entry, info.src_acct_id)
+            )
             entities.append(
                 DukeEnergyLastPollSensor(coordinator, entry, info.src_acct_id)
             )
@@ -180,6 +204,17 @@ async def async_setup_entry(
                     coordinator, entry, info.src_acct_id, description
                 )
                 for description in BILLING_SENSORS
+            )
+        entities.append(
+            DukeEnergyConsumptionCarrier(coordinator, entry, serial_number, info)
+        )
+        # The cost carrier shares the coordinator's cost gate (see
+        # COST_ENABLED_MODES). Disabling a meter's cost mode later removes
+        # the live entity on reload but leaves its registry row — and thus
+        # its statistic id and history — intact for a future re-enable.
+        if cost_meters.get(serial_number, {}).get("mode") in COST_ENABLED_MODES:
+            entities.append(
+                DukeEnergyCostCarrier(coordinator, entry, serial_number, info)
             )
         entities.append(
             DukeEnergyLastChangeSensor(coordinator, entry, serial_number, info)
@@ -243,6 +278,103 @@ class DukeEnergyAccountEntity(CoordinatorEntity["DukeEnergyCoordinator"], Sensor
             name=f"Duke Energy Account {account_number}",
             manufacturer="Duke Energy",
         )
+
+
+class StatisticsCarrierMixin(SensorEntity):
+    """
+    A statistics carrier: an entity whose state is permanently unknown.
+
+    The coordinator imports long-term statistics keyed to this entity's id
+    (see the module docstring). ``native_value`` stays None so the recorder
+    never compiles competing rows, and the entity never reports unavailable —
+    an unknown state reads as "no live data" rather than "broken", and the
+    imported statistics update regardless of poll outcomes.
+    """
+
+    @property
+    def available(self) -> bool:
+        """Always available; the state is intentionally unknown."""
+        return True
+
+    def _pin_identity(self, unique_id: str) -> None:
+        """
+        Pin the carrier's portable unique id and suggest its entity id.
+
+        The unique id is entry-agnostic (``duke_…``, see const.py) so the
+        statistic id it anchors survives reinstalls, and the suggested
+        entity id makes the initial statistic id exactly
+        ``sensor.{slugified unique_id}`` (serials and account ids may hold
+        characters that are invalid in an object id). Users may rename
+        freely afterward — the recorder migrates statistics on entity-id
+        changes.
+        """
+        self._attr_unique_id = unique_id
+        self.entity_id = f"sensor.{slugify(unique_id)}"
+
+
+class DukeEnergyConsumptionCarrier(StatisticsCarrierMixin, DukeEnergyMeterEntity):
+    """Carrier for a meter's imported consumption statistics."""
+
+    _attr_state_class = SensorStateClass.TOTAL
+    _attr_translation_key = "energy_consumption"
+
+    def __init__(
+        self,
+        coordinator: DukeEnergyCoordinator,
+        entry: DukeEnergyConfigEntry,
+        serial_number: str,
+        info: MeterInfo,
+    ) -> None:
+        """Initialize with the meter's service-type device class and unit."""
+        super().__init__(coordinator, entry, serial_number, info, "energy_consumption")
+        self._pin_identity(consumption_unique_id(info.service_type, serial_number))
+        if info.service_type == "GAS":
+            self._attr_device_class = SensorDeviceClass.GAS
+            self._attr_native_unit_of_measurement = UnitOfVolume.CENTUM_CUBIC_FEET
+        else:
+            self._attr_device_class = SensorDeviceClass.ENERGY
+            self._attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
+
+
+class DukeEnergyCostCarrier(StatisticsCarrierMixin, DukeEnergyMeterEntity):
+    """Carrier for a meter's imported cost statistics."""
+
+    _attr_device_class = SensorDeviceClass.MONETARY
+    _attr_state_class = SensorStateClass.TOTAL
+    _attr_translation_key = "total_cost"
+
+    def __init__(
+        self,
+        coordinator: DukeEnergyCoordinator,
+        entry: DukeEnergyConfigEntry,
+        serial_number: str,
+        info: MeterInfo,
+    ) -> None:
+        """Initialize with the HA-configured currency."""
+        super().__init__(coordinator, entry, serial_number, info, "total_cost")
+        self._pin_identity(cost_unique_id(info.service_type, serial_number))
+        self._attr_native_unit_of_measurement = (
+            coordinator.hass.config.currency or "USD"
+        )
+
+
+class DukeEnergyTemperatureCarrier(StatisticsCarrierMixin, DukeEnergyAccountEntity):
+    """Carrier for an account's imported outdoor temperature statistics."""
+
+    _attr_device_class = SensorDeviceClass.TEMPERATURE
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_native_unit_of_measurement = UnitOfTemperature.FAHRENHEIT
+    _attr_translation_key = "temperature"
+
+    def __init__(
+        self,
+        coordinator: DukeEnergyCoordinator,
+        entry: DukeEnergyConfigEntry,
+        src_acct_id: str,
+    ) -> None:
+        """Initialize on the account device."""
+        super().__init__(coordinator, entry, src_acct_id, "temperature")
+        self._pin_identity(temperature_unique_id(src_acct_id))
 
 
 class DukeEnergyLastPollSensor(DukeEnergyAccountEntity):
