@@ -15,8 +15,6 @@ coverage.xml
 .ruff_cache
 *.DS_Store
 /docs
-CLAUDE.md
-
 
 # Home Assistant configuration
 config/*
