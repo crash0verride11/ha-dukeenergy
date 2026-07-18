@@ -7,7 +7,7 @@ This is a fork of [hunterjm](https://github.com/hunterjm/ha-dukeenergy)'s work w
 - Gas meter readings
 - Average temperature readings — 1 per duke account, as meters at the same location have the same temperature reading.
 - Polling timing improvements — up to three semi-random polls over a narrower window, see FAQ
-- Cost statistics — configure a price and the integration calculates a running total
+- Cost statistics — configure a price and the integration calculates a running total, see configuration below
 - Account and meter entities:
   - Account entities: When the integration last polled (`Last updated`), `Cost last bill cycle`, `Cost this time last year`
   - Meter entities: When each meter last received new data (`Last changed`), `Usage last bill cycle`, `Usage this bill cycle`,  `Usage this time last year`
