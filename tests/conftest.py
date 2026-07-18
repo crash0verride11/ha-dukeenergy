@@ -111,6 +111,11 @@ def mock_recorder() -> Generator[Mock]:
 
     recorder_instance.async_add_executor_job = AsyncMock(side_effect=_passthrough)
     recorder_instance.async_clear_statistics = Mock()
+    # The coordinator's recorder wait queues a SynchronizeTask; resolve its
+    # future immediately so the status flips straight to complete.
+    recorder_instance.queue_task = Mock(
+        side_effect=lambda task: task.future.set_result(None)
+    )
 
     with (
         patch(
@@ -148,6 +153,7 @@ class StatsStore:
     def __init__(self) -> None:
         self.data: dict[str, list[dict]] = {}
         self.mock_add: Mock
+        self.recorder: Mock
 
     def seed(self, statistic_id: str, rows: list[dict]) -> None:
         """Preload rows (e.g. a price sensor's mean history) for a statistic."""
@@ -223,6 +229,11 @@ def stats_store() -> Generator[StatsStore]:
 
     recorder_instance.async_add_executor_job = AsyncMock(side_effect=_passthrough)
     recorder_instance.async_clear_statistics = Mock(side_effect=store.clear)
+    # The coordinator's recorder wait queues a SynchronizeTask; resolve its
+    # future immediately so the status flips straight to complete.
+    recorder_instance.queue_task = Mock(
+        side_effect=lambda task: task.future.set_result(None)
+    )
 
     with (
         patch(
@@ -243,6 +254,7 @@ def stats_store() -> Generator[StatsStore]:
         ),
     ):
         store.mock_add = mock_add
+        store.recorder = recorder_instance
         yield store
 
 

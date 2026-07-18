@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from unittest.mock import DEFAULT, AsyncMock
+from unittest.mock import DEFAULT, AsyncMock, Mock
 
 from aiohttp import ClientError
 from freezegun.api import FrozenDateTimeFactory
@@ -72,16 +72,22 @@ async def test_devices_and_diagnostic_sensors(
     assert meter_device.via_device_id == account_device.id
 
     poll_id = _account_eid(hass, mock_config_entry, "src-1", "last_duke_poll")
+    next_id = _account_eid(hass, mock_config_entry, "src-1", "next_duke_poll")
     change_id = _meter_eid(hass, mock_config_entry, "123", "last_meter_change")
     poll_entry = registry.async_get(poll_id)
+    next_entry = registry.async_get(next_id)
     change_entry = registry.async_get(change_id)
     assert poll_entry.device_id == account_device.id
     assert poll_entry.entity_category is EntityCategory.DIAGNOSTIC
+    assert next_entry.device_id == account_device.id
+    assert next_entry.entity_category is EntityCategory.DIAGNOSTIC
     assert change_entry.device_id == meter_device.id
     assert change_entry.entity_category is EntityCategory.DIAGNOSTIC
 
-    # The first refresh polled and wrote statistics, so both have timestamps.
+    # The first refresh polled and wrote statistics, so all have timestamps;
+    # the scheduler always sets a next poll time.
     assert dt_util.parse_datetime(hass.states.get(poll_id).state) is not None
+    assert dt_util.parse_datetime(hass.states.get(next_id).state) is not None
     assert dt_util.parse_datetime(hass.states.get(change_id).state) is not None
 
 
@@ -437,6 +443,48 @@ async def test_diagnostic_sensors_stay_available_on_failed_poll(
     assert coordinator.last_update_success is False
     for entity_id in (poll_id, change_id):
         assert hass.states.get(entity_id).state != "unavailable"
+
+
+async def test_status_sensor_lifecycle(
+    recorder_mock: object,
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+    mock_api_with_meters: AsyncMock,
+    stats_store: StatsStore,
+    auto_enable_custom_integrations: None,
+) -> None:
+    """Status walks recording -> complete, and flips to failed on an error."""
+    # Capture the SynchronizeTask instead of resolving it, holding the
+    # recorder "commit" open so the recording phase is observable.
+    sync_tasks: list = []
+    stats_store.recorder.queue_task = Mock(side_effect=sync_tasks.append)
+
+    mock_config_entry.add_to_hass(hass)
+    await _setup_entry(hass, mock_config_entry)
+
+    status_id = _account_eid(hass, mock_config_entry, "src-1", "status")
+    # The first refresh queued statistics; the recorder has not committed yet.
+    assert hass.states.get(status_id).state == "recording"
+
+    sync_tasks[-1].future.set_result(None)
+    await hass.async_block_till_done()
+    assert hass.states.get(status_id).state == "complete"
+
+    # A skipped poll (today's data already retrieved) completes without a
+    # recording phase.
+    coordinator = mock_config_entry.runtime_data
+    await coordinator.async_refresh()
+    await hass.async_block_till_done()
+    assert hass.states.get(status_id).state == "complete"
+
+    # A failed poll flips to failed even without a coordinator notification
+    # (repeated failures skip it).
+    mock_api_with_meters.get_meters.side_effect = TimeoutError
+    coordinator._last_successful_date = None  # force a real poll
+    for _ in range(2):
+        await coordinator.async_refresh()
+        await hass.async_block_till_done()
+        assert hass.states.get(status_id).state == "failed"
 
 
 async def test_unload_entry(
