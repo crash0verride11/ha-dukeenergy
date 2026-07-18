@@ -66,11 +66,11 @@ For external statistics, such as those the integration makes, home assistant onl
 
 ### I successfully added the integration, where is my data?
 
-The integration downloads three years of data from duke and home assistant needs time to calculate statistics based on your data. Wait a while and try again.
+The integration downloads three years of data from duke and home assistant needs time to calculate statistics based on your data. You can check the `Status` entity on any of your account devices to see if the integration is 'Fetching', 'Recording', or if data addition is 'Complete'.
 
 ### I don't see any usage or cost entities?
 
-Only external statistics are created. Since we only know historical data, these could never have a known current state.
+Only external statistics are created with a name such as `duke_energy:gas_333333_energy_consumption`. Since we only know historical data, we are not able to set a known current state. While it is possible to create entities with permanent `unknown` states this does not allow cost calulcation (which is calculated from a current state) nor are they usable by additional dashboard card types.
 
 ### When is new data retrieved?
 
