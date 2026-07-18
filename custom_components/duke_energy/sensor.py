@@ -3,7 +3,10 @@ Sensors for the Duke Energy integration.
 
 One account device per Duke Energy account, holding:
 
+- ``status`` ("Status"): the integration's current update phase
+  (fetching / recording / complete / failed).
 - ``last_duke_poll`` ("Last updated"): when Duke Energy was last polled.
+- ``next_poll_time`` ("Next scheduled update"): when the next poll is due.
 - ``cost_last_bill_cycle`` / ``cost_last_year``: the account-wide bill
   amounts from the monthly usage summary.
 
@@ -33,7 +36,7 @@ from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .const import DOMAIN
+from .const import DOMAIN, STATUS_OPTIONS
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -167,7 +170,13 @@ async def async_setup_entry(
         if info.src_acct_id not in accounts_seen:
             accounts_seen.add(info.src_acct_id)
             entities.append(
+                DukeEnergyStatusSensor(coordinator, entry, info.src_acct_id)
+            )
+            entities.append(
                 DukeEnergyLastPollSensor(coordinator, entry, info.src_acct_id)
+            )
+            entities.append(
+                DukeEnergyNextPollSensor(coordinator, entry, info.src_acct_id)
             )
             entities.extend(
                 DukeEnergyAccountCostSensor(
@@ -245,6 +254,41 @@ class DukeEnergyAccountEntity(CoordinatorEntity["DukeEnergyCoordinator"], Sensor
         )
 
 
+class DukeEnergyStatusSensor(DukeEnergyAccountEntity):
+    """
+    The integration's current update phase (account-wide).
+
+    ``recording`` means statistics are queued but not yet committed by the
+    recorder, so they are not visible to the energy dashboard until the
+    status flips to ``complete`` — on an initial 3-year load that can take
+    many minutes.
+    """
+
+    _attr_device_class = SensorDeviceClass.ENUM
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_translation_key = "status"
+    _attr_options = STATUS_OPTIONS
+
+    def __init__(
+        self,
+        coordinator: DukeEnergyCoordinator,
+        entry: DukeEnergyConfigEntry,
+        src_acct_id: str,
+    ) -> None:
+        """Initialize on the account device."""
+        super().__init__(coordinator, entry, src_acct_id, "status")
+
+    @property
+    def available(self) -> bool:
+        """Report polling health, so never go unavailable on a failed poll."""
+        return True
+
+    @property
+    def native_value(self) -> str | None:
+        """Return the current update phase."""
+        return self.coordinator.status
+
+
 class DukeEnergyLastPollSensor(DukeEnergyAccountEntity):
     """When the integration last polled Duke Energy (account-wide)."""
 
@@ -270,6 +314,33 @@ class DukeEnergyLastPollSensor(DukeEnergyAccountEntity):
     def native_value(self) -> datetime | None:
         """Return the time of the last poll attempt."""
         return self.coordinator.last_poll_time
+
+
+class DukeEnergyNextPollSensor(DukeEnergyAccountEntity):
+    """When the integration will next poll Duke Energy (account-wide)."""
+
+    _attr_device_class = SensorDeviceClass.TIMESTAMP
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_translation_key = "next_duke_poll"
+
+    def __init__(
+        self,
+        coordinator: DukeEnergyCoordinator,
+        entry: DukeEnergyConfigEntry,
+        src_acct_id: str,
+    ) -> None:
+        """Initialize on the account device."""
+        super().__init__(coordinator, entry, src_acct_id, "next_duke_poll")
+
+    @property
+    def available(self) -> bool:
+        """Report polling health, so never go unavailable on a failed poll."""
+        return True
+
+    @property
+    def native_value(self) -> datetime | None:
+        """Return the time the next poll is scheduled for."""
+        return self.coordinator.next_poll_time
 
 
 class DukeEnergyLastChangeSensor(DukeEnergyMeterEntity, RestoreSensor):

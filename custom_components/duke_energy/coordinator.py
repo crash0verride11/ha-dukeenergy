@@ -23,6 +23,7 @@ from homeassistant.components.recorder.statistics import (
     get_last_statistics,
     statistics_during_period,
 )
+from homeassistant.components.recorder.tasks import SynchronizeTask
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import (
     STATE_UNAVAILABLE,
@@ -38,7 +39,13 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from homeassistant.util import dt as dt_util
 from homeassistant.util.unit_conversion import EnergyConverter
 
-from .const import DOMAIN
+from .const import (
+    DOMAIN,
+    STATUS_COMPLETE,
+    STATUS_FAILED,
+    STATUS_FETCHING,
+    STATUS_RECORDING,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -149,6 +156,13 @@ class DukeEnergyCoordinator(DataUpdateCoordinator[None]):
         # identity, each account's display number, per-meter bill-cycle
         # usage summaries, and per-account bill-cycle costs.
         self.last_poll_time: datetime | None = None
+        # When the next poll is scheduled for (see _schedule_next_check).
+        self.next_poll_time: datetime | None = None
+        # Current update phase (see const.STATUS_*), surfaced by the account
+        # Status sensor. None until the first poll starts.
+        self.status: str | None = None
+        # Whether the current poll queued any statistics rows to the recorder.
+        self._stats_queued = False
         self.meter_last_updated: dict[str, datetime] = {}
         self.meter_info: dict[str, MeterInfo] = {}
         self.account_info: dict[str, str] = {}
@@ -207,7 +221,7 @@ class DukeEnergyCoordinator(DataUpdateCoordinator[None]):
             self._unsub_scheduled = None
 
         now = dt_util.now(tz)
-        next_time: datetime | None = None
+        next_poll_time: datetime | None = None
 
         if not had_success:
             today_offset = self._get_or_create_daily_offset(now.date())
@@ -216,30 +230,37 @@ class DukeEnergyCoordinator(DataUpdateCoordinator[None]):
                     datetime.combine(now.date(), base_time, tzinfo=tz) + today_offset
                 )
                 if candidate > now:
-                    next_time = candidate
+                    next_poll_time = candidate
                     break
 
-        if next_time is None:
+        if next_poll_time is None:
             # Success, or no remaining windows today — schedule for first slot tomorrow.
             tomorrow = now.date() + timedelta(days=1)
             tomorrow_offset = self._get_or_create_daily_offset(tomorrow)
-            next_time = (
+            next_poll_time = (
                 datetime.combine(tomorrow, _BASE_TIMES_ET[0], tzinfo=tz)
                 + tomorrow_offset
             )
 
-        _LOGGER.debug("Next Duke Energy check scheduled for %s", next_time)
+        _LOGGER.debug("Next Duke Energy check scheduled for %s", next_poll_time)
+        self.next_poll_time = next_poll_time
 
         @callback
         def _trigger_refresh(_now: datetime) -> None:
             self.hass.async_create_task(self.async_refresh())
 
         self._unsub_scheduled = async_track_point_in_time(
-            self.hass, _trigger_refresh, next_time
+            self.hass, _trigger_refresh, next_poll_time
         )
 
     async def _async_update_data(self) -> None:
         """Insert Duke Energy statistics."""
+        # The coordinator only notifies listeners when the refresh finishes,
+        # so the fetching phase needs an explicit push; the exit phase set in
+        # the finally rides that end-of-refresh notification.
+        self.status = STATUS_FETCHING
+        self.async_update_listeners()
+        self._stats_queued = False
         tz = await dt_util.async_get_time_zone(_DUKE_TZ)
         today = dt_util.now(tz).date()
         yesterday = today - timedelta(days=1)
@@ -381,6 +402,7 @@ class DukeEnergyCoordinator(DataUpdateCoordinator[None]):
                     # New consumption rows landed: the meter's data changed.
                     # Cost/temperature are derived, so they don't count.
                     self.meter_last_updated[serial_number] = dt_util.utcnow()
+                    self._stats_queued = True
 
                 # Cost statistic (per-meter mode: sensor / static / off)
                 cost_config = cost_meters.get(serial_number)
@@ -453,6 +475,8 @@ class DukeEnergyCoordinator(DataUpdateCoordinator[None]):
                 async_add_external_statistics(
                     self.hass, temperature_metadata, temperature_statistics
                 )
+                if temperature_statistics:
+                    self._stats_queued = True
 
                 # --- End temperature statistic addition
 
@@ -474,8 +498,27 @@ class DukeEnergyCoordinator(DataUpdateCoordinator[None]):
             ):
                 self._last_successful_date = today
 
+        except Exception:
+            self.status = STATUS_FAILED
+            # Explicit push: the coordinator skips its end-of-refresh notify
+            # on repeated failures, which would strand the sensor on fetching.
+            self.async_update_listeners()
+            raise
         finally:
             self.last_poll_time = dt_util.utcnow()
+            if self.status != STATUS_FAILED:
+                if self._stats_queued:
+                    # Statistics are queued but not queryable (e.g. by the
+                    # energy dashboard) until the recorder commits them —
+                    # minutes, on an initial 3-year load. Flip when it does.
+                    self.status = STATUS_RECORDING
+                    self.config_entry.async_create_background_task(
+                        self.hass,
+                        self._async_wait_for_recorder(),
+                        name="duke_energy_recorder_wait",
+                    )
+                else:
+                    self.status = STATUS_COMPLETE
             had_success = self._last_successful_date == today
             if had_success:
                 _LOGGER.debug("Duke Energy data retrieval successful")
@@ -485,6 +528,25 @@ class DukeEnergyCoordinator(DataUpdateCoordinator[None]):
                     "will retry at next scheduled time"
                 )
             self._schedule_next_check(tz, had_success=had_success)
+
+    async def _async_wait_for_recorder(self) -> None:
+        """
+        Flip the status to complete once queued statistics are committed.
+
+        A SynchronizeTask is queued directly rather than via the recorder's
+        async_block_till_done helper, which returns early while an import is
+        mid-run (the task is dequeued before running and commits outside the
+        event session, so the queue looks idle). Queued serially behind the
+        imports, this task's future resolves only once they have committed and
+        the statistics are queryable. The guard skips the flip if another poll
+        has since moved the status on.
+        """
+        future = self.hass.loop.create_future()
+        get_instance(self.hass).queue_task(SynchronizeTask(future))
+        await future
+        if self.status == STATUS_RECORDING:
+            self.status = STATUS_COMPLETE
+            self.async_update_listeners()
 
     async def _async_get_bill_cycle_start(
         self, serial_number: str, src_acct_id: str
@@ -808,6 +870,8 @@ class DukeEnergyCoordinator(DataUpdateCoordinator[None]):
             self._cost_metadata(cost_statistic_id, name_prefix),
             cost_statistics,
         )
+        if cost_statistics:
+            self._stats_queued = True
 
     def _cost_metadata(
         self, cost_statistic_id: str, name_prefix: str

@@ -76,8 +76,20 @@
   },
   "entity": {
     "sensor": {
+      "status": {
+        "name": "Status",
+        "state": {
+          "fetching": "Fetching",
+          "recording": "Recording",
+          "complete": "Complete",
+          "failed": "Failed"
+        }
+      },
       "last_duke_poll": {
         "name": "Last updated"
+      },
+      "next_duke_poll": {
+        "name": "Next scheduled update"
       },
       "last_meter_change": {
         "name": "Last changed"
