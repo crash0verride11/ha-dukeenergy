@@ -353,8 +353,8 @@ class DukeEnergyCoordinator(DataUpdateCoordinator[None]):
                     )
                     last_stats_time = stats[consumption_statistic_id][0]["start"]  # pyright: ignore[reportTypedDictNotRequiredAccess]
 
-                if any(k.date() == yesterday for k in usage):
-                    yesterday_data_count += 1
+                has_yesterday_data = any(k.date() == yesterday for k in usage)
+                yesterday_data_count += int(has_yesterday_data)
 
                 consumption_statistics = []
 
@@ -399,10 +399,12 @@ class DukeEnergyCoordinator(DataUpdateCoordinator[None]):
                     self.hass, consumption_metadata, consumption_statistics
                 )
                 if consumption_statistics:
-                    # New consumption rows landed: the meter's data changed.
-                    # Cost/temperature are derived, so they don't count.
-                    self.meter_last_updated[serial_number] = dt_util.utcnow()
                     self._stats_queued = True
+                    if has_yesterday_data:
+                        # Only the newest day counts as a change: every
+                        # update writes rows for polled period while 
+                        # Duke still has nothing for yesterday. 
+                        self.meter_last_updated[serial_number] = dt_util.utcnow()
 
                 # Cost statistic (per-meter mode: sensor / static / off)
                 cost_config = cost_meters.get(serial_number)
