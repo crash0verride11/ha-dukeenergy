@@ -6,6 +6,7 @@ import base64
 import json
 import time
 from collections.abc import Generator
+from datetime import timedelta
 from unittest.mock import DEFAULT, AsyncMock, Mock, patch
 
 import pytest
@@ -372,7 +373,12 @@ def mock_api() -> Generator[AsyncMock]:
 
 @pytest.fixture
 def mock_api_with_meters(mock_api: AsyncMock) -> AsyncMock:
-    """Extend mock_api with a single electric meter and one reading."""
+    """Extend mock_api with a single electric meter and one reading.
+
+    The reading is dated yesterday: the coordinator's fetch window ends at
+    yesterday midnight, so Duke never returns a reading for today, and only
+    a yesterday reading marks the poll (and the meter) as up to date.
+    """
     mock_api.get_meters.return_value = {
         "123": {
             "serialNum": "123",
@@ -383,7 +389,7 @@ def mock_api_with_meters(mock_api: AsyncMock) -> AsyncMock:
     }
     mock_api.get_energy_usage.return_value = {
         "data": {
-            dt_util.now(): {
+            dt_util.now() - timedelta(days=1): {
                 "energy": 1.3,
                 "temperature": 70,
             }
@@ -405,7 +411,7 @@ def mock_api_with_gas_meter(mock_api: AsyncMock) -> AsyncMock:
         },
     }
     mock_api.get_energy_usage.return_value = {
-        "data": {dt_util.now(): {"energy": 2.5, "temperature": 68}},
+        "data": {dt_util.now() - timedelta(days=1): {"energy": 2.5, "temperature": 68}},
         "missing": [],
     }
     return mock_api

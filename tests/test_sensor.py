@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from unittest.mock import DEFAULT, AsyncMock, Mock
 
 from aiohttp import ClientError
@@ -387,6 +387,42 @@ async def test_last_meter_change_unknown_without_new_data(
 
     assert dt_util.parse_datetime(hass.states.get(poll_id).state) is not None
     assert hass.states.get(change_id).state == STATE_UNKNOWN
+
+
+async def test_last_meter_change_ignores_catch_up_only_data(
+    recorder_mock: object,
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+    mock_api_with_meters: AsyncMock,
+    stats_store: StatsStore,
+    auto_enable_custom_integrations: None,
+) -> None:
+    """Historical rows without yesterday's data must not touch last_meter_change.
+
+    Mirrors a catch-up poll: Duke returns older readings the recorder has not
+    seen (so statistics are written) while yesterday is still unavailable, and
+    the coordinator reports no new usage data.
+    """
+    mock_api_with_meters.get_energy_usage.return_value = {
+        "data": {
+            dt_util.now() - timedelta(days=5): {"energy": 1.1, "temperature": 70},
+            dt_util.now() - timedelta(days=4): {"energy": 1.2, "temperature": 71},
+        },
+        "missing": [],
+    }
+    mock_config_entry.add_to_hass(hass)
+    await _setup_entry(hass, mock_config_entry)
+
+    change_id = _meter_eid(hass, mock_config_entry, "123", "last_meter_change")
+    poll_id = _account_eid(hass, mock_config_entry, "src-1", "last_duke_poll")
+
+    # Statistics were written, but none of them were for yesterday.
+    assert stats_store.data["duke_energy:electric_123_energy_consumption"]
+    assert mock_config_entry.runtime_data._last_successful_date is None
+    assert hass.states.get(change_id).state == STATE_UNKNOWN
+
+    # The poll itself still happened, so last_duke_poll is set.
+    assert dt_util.parse_datetime(hass.states.get(poll_id).state) is not None
 
 
 async def test_last_meter_change_restored_across_reload(
