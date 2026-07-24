@@ -81,7 +81,7 @@
         "state": {
           "fetching": "Fetching",
           "recording": "Recording",
-          "complete": "Complete",
+          "complete": "Finished",
           "failed": "Failed"
         }
       },
