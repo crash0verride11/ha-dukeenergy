@@ -87,18 +87,21 @@ USAGE_SENSORS: tuple[DukeEnergySummarySensorDescription, ...] = (
         translation_key="usage_this_bill_cycle",
         bucket="this_cycle",
         suggested_display_precision=2,
+        icon="mdi:calendar-month",
     ),
     DukeEnergySummarySensorDescription(
         key="usage_last_bill_cycle",
         translation_key="usage_last_bill_cycle",
         bucket="last_cycle",
         suggested_display_precision=2,
+        icon="mdi:calendar-arrow-left",
     ),
     DukeEnergySummarySensorDescription(
         key="usage_last_year",
         translation_key="usage_last_year",
         bucket="last_year",
         suggested_display_precision=2,
+        icon="mdi:calendar-refresh",
     ),
 )
 
@@ -109,6 +112,7 @@ COST_SENSORS: tuple[DukeEnergySummarySensorDescription, ...] = (
         bucket="last_cycle",
         device_class=SensorDeviceClass.MONETARY,
         suggested_display_precision=2,
+        icon="mdi:calendar-arrow-left",
     ),
     DukeEnergySummarySensorDescription(
         key="cost_last_year",
@@ -116,6 +120,7 @@ COST_SENSORS: tuple[DukeEnergySummarySensorDescription, ...] = (
         bucket="last_year",
         device_class=SensorDeviceClass.MONETARY,
         suggested_display_precision=2,
+        icon="mdi:calendar-refresh",
     ),
 )
 
@@ -133,17 +138,20 @@ BILLING_SENSORS: tuple[DukeEnergyBillingSensorDescription, ...] = (
         translation_key="bill_balance",
         device_class=SensorDeviceClass.MONETARY,
         suggested_display_precision=2,
+        icon="mdi:account-credit-card",
         value_fn=lambda acct: _as_float(acct.get("balance")),
     ),
     DukeEnergyBillingSensorDescription(
         key="bill_due_date",
         translation_key="bill_due_date",
         device_class=SensorDeviceClass.DATE,
+        icon="mdi:credit-card-clock",
         value_fn=lambda acct: _as_date(acct.get("dueDate")),
     ),
     DukeEnergyBillingSensorDescription(
         key="bill_status",
         translation_key="bill_status",
+        icon="mdi:credit-card-check",
         value_fn=lambda acct: _as_sentence(acct.get("abbreviatedBillStatus")),
     ),
 )
@@ -268,6 +276,7 @@ class DukeEnergyStatusSensor(DukeEnergyAccountEntity):
     _attr_entity_category = EntityCategory.DIAGNOSTIC
     _attr_translation_key = "status"
     _attr_options = STATUS_OPTIONS
+    _attr_icon = "mdi:database-check"
 
     def __init__(
         self,
@@ -295,6 +304,7 @@ class DukeEnergyLastPollSensor(DukeEnergyAccountEntity):
     _attr_device_class = SensorDeviceClass.TIMESTAMP
     _attr_entity_category = EntityCategory.DIAGNOSTIC
     _attr_translation_key = "last_duke_poll"
+    _attr_icon = "mdi:database-refresh"
 
     def __init__(
         self,
@@ -322,6 +332,7 @@ class DukeEnergyNextPollSensor(DukeEnergyAccountEntity):
     _attr_device_class = SensorDeviceClass.TIMESTAMP
     _attr_entity_category = EntityCategory.DIAGNOSTIC
     _attr_translation_key = "next_duke_poll"
+    _attr_icon = "mdi:database-clock"
 
     def __init__(
         self,
