@@ -10,7 +10,7 @@ dev = [
     "pytest-asyncio>=0.24",
     "pytest-homeassistant-custom-component>=0.13.0",
     "PyJWT>=2.8",
-    "aiodukeenergy==1.1.0",
+    "aiodukeenergy-co==1.2.0",
 ]
 
 [tool.pytest.ini_options]

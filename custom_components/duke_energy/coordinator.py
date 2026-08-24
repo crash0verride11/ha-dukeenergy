@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, tzinfo
 from typing import Any, cast
 
+from aiodukeenergy_co import DukeEnergy, DukeEnergyAuthError
 from aiohttp import ClientError
 from homeassistant.components.recorder import (
     get_instance,  # pyright: ignore[reportPrivateImportUsage]
@@ -22,6 +23,7 @@ from homeassistant.components.recorder.statistics import (
     get_last_statistics,
     statistics_during_period,
 )
+from homeassistant.components.recorder.tasks import SynchronizeTask
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import (
     STATE_UNAVAILABLE,
@@ -37,8 +39,13 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from homeassistant.util import dt as dt_util
 from homeassistant.util.unit_conversion import EnergyConverter
 
-from .aiodukeenergy import DukeEnergy, DukeEnergyAuthError
-from .const import DOMAIN
+from .const import (
+    DOMAIN,
+    STATUS_COMPLETE,
+    STATUS_FAILED,
+    STATUS_FETCHING,
+    STATUS_RECORDING,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -56,7 +63,29 @@ _DUKE_TZ = "America/New_York"
 _BASE_TIMES_ET = (time(9, 0), time(14, 0), time(19, 0))
 _OFFSET_WINDOW = timedelta(hours=2)
 
+# A cached bill-cycle start older than this is likely from an already-closed
+# cycle (cycles run ~30 days); reusing it would window this-cycle usage
+# across two cycles.
+_CYCLE_START_MAX_AGE_DAYS = 28
+
 type DukeEnergyConfigEntry = ConfigEntry[DukeEnergyCoordinator]
+
+
+@dataclass(slots=True, frozen=True)
+class MeterInfo:
+    """A supported meter's identity, for device creation at platform setup."""
+
+    service_type: str
+    src_acct_id: str
+
+
+def _summary_value(summary: dict[str, Any], period: str, key: str) -> float | None:
+    """Pull a numeric field out of a monthly usage summary, or None."""
+    value = (summary.get(period) or {}).get(key)
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 @dataclass(slots=True)
@@ -121,6 +150,30 @@ class DukeEnergyCoordinator(DataUpdateCoordinator[None]):
         self.api = api
         self._statistic_ids: set = set()
         self._last_successful_date: date | None = None
+        # Sensor sources (see sensor.py):
+        # when the last poll attempt ran (success or not), when each meter
+        # last had consumption statistics written, each supported meter's
+        # identity, each account's display number, per-meter bill-cycle
+        # usage summaries, and per-account bill-cycle costs.
+        self.last_poll_time: datetime | None = None
+        # When the next poll is scheduled for (see _schedule_next_check).
+        self.next_poll_time: datetime | None = None
+        # Current update phase (see const.STATUS_*), surfaced by the account
+        # Status sensor. None until the first poll starts.
+        self.status: str | None = None
+        # Whether the current poll queued any statistics rows to the recorder.
+        self._stats_queued = False
+        self.meter_last_updated: dict[str, datetime] = {}
+        self.meter_info: dict[str, MeterInfo] = {}
+        self.account_info: dict[str, str] = {}
+        self.monthly_usage: dict[str, dict[str, float | None]] = {}
+        self.account_costs: dict[str, dict[str, float | None]] = {}
+        # Billing and payment headline info per account number (see sensor.py).
+        self.billing_payment_info: dict[str, dict[str, Any]] = {}
+        # Last successfully derived bill-cycle start per account. A cycle's
+        # start does not change mid-cycle, so this is reused (while plausibly
+        # current) when the graph lookup fails on a later poll.
+        self._cycle_start_by_account: dict[str, datetime] = {}
         self._unsub_scheduled: Callable[[], None] | None = None
         self._daily_offset: timedelta | None = None
         self._offset_date: date | None = None
@@ -168,7 +221,7 @@ class DukeEnergyCoordinator(DataUpdateCoordinator[None]):
             self._unsub_scheduled = None
 
         now = dt_util.now(tz)
-        next_time: datetime | None = None
+        next_poll_time: datetime | None = None
 
         if not had_success:
             today_offset = self._get_or_create_daily_offset(now.date())
@@ -177,36 +230,45 @@ class DukeEnergyCoordinator(DataUpdateCoordinator[None]):
                     datetime.combine(now.date(), base_time, tzinfo=tz) + today_offset
                 )
                 if candidate > now:
-                    next_time = candidate
+                    next_poll_time = candidate
                     break
 
-        if next_time is None:
+        if next_poll_time is None:
             # Success, or no remaining windows today — schedule for first slot tomorrow.
             tomorrow = now.date() + timedelta(days=1)
             tomorrow_offset = self._get_or_create_daily_offset(tomorrow)
-            next_time = (
+            next_poll_time = (
                 datetime.combine(tomorrow, _BASE_TIMES_ET[0], tzinfo=tz)
                 + tomorrow_offset
             )
 
-        _LOGGER.debug("Next Duke Energy check scheduled for %s", next_time)
+        _LOGGER.debug("Next Duke Energy check scheduled for %s", next_poll_time)
+        self.next_poll_time = next_poll_time
 
         @callback
         def _trigger_refresh(_now: datetime) -> None:
             self.hass.async_create_task(self.async_refresh())
 
         self._unsub_scheduled = async_track_point_in_time(
-            self.hass, _trigger_refresh, next_time
+            self.hass, _trigger_refresh, next_poll_time
         )
 
     async def _async_update_data(self) -> None:
         """Insert Duke Energy statistics."""
+        # The coordinator only notifies listeners when the refresh finishes,
+        # so the fetching phase needs an explicit push; the exit phase set in
+        # the finally rides that end-of-refresh notification.
+        self.status = STATUS_FETCHING
+        self.async_update_listeners()
+        self._stats_queued = False
         tz = await dt_util.async_get_time_zone(_DUKE_TZ)
         today = dt_util.now(tz).date()
         yesterday = today - timedelta(days=1)
         supported_meter_count = 0
         yesterday_data_count = 0
         temp_accounts_seen: set[str] = set()
+        monthly_accounts_seen: set[str] = set()
+        bill_cycle_starts: dict[str, datetime | None] = {}
         cost_meters: dict[str, dict[str, Any]] = self.config_entry.options.get(
             "cost_meters", {}
         )
@@ -233,6 +295,17 @@ class DukeEnergyCoordinator(DataUpdateCoordinator[None]):
                         "Skipping unsupported meter type %s", meter["serviceType"]
                     )
                     continue
+
+                src_acct_id = meter["account"]["srcAcctId"]
+                self.meter_info[serial_number] = MeterInfo(
+                    meter["serviceType"], src_acct_id
+                )
+                self.account_info[src_acct_id] = meter["account"]["accountNumber"]
+                # Before the statistics work: its early `continue`s must not
+                # skip the bill-cycle summary refresh.
+                await self._async_update_monthly_usage(
+                    serial_number, src_acct_id, monthly_accounts_seen, bill_cycle_starts
+                )
 
                 id_prefix = f"{meter['serviceType'].lower()}_{serial_number}"
                 consumption_statistic_id = f"{DOMAIN}:{id_prefix}_energy_consumption"
@@ -280,8 +353,8 @@ class DukeEnergyCoordinator(DataUpdateCoordinator[None]):
                     )
                     last_stats_time = stats[consumption_statistic_id][0]["start"]  # pyright: ignore[reportTypedDictNotRequiredAccess]
 
-                if any(k.date() == yesterday for k in usage):
-                    yesterday_data_count += 1
+                has_yesterday_data = any(k.date() == yesterday for k in usage)
+                yesterday_data_count += int(has_yesterday_data)
 
                 consumption_statistics = []
 
@@ -325,6 +398,13 @@ class DukeEnergyCoordinator(DataUpdateCoordinator[None]):
                 async_add_external_statistics(
                     self.hass, consumption_metadata, consumption_statistics
                 )
+                if consumption_statistics:
+                    self._stats_queued = True
+                    if has_yesterday_data:
+                        # Only the newest day counts as a change: every
+                        # update writes rows for polled period while 
+                        # Duke still has nothing for yesterday. 
+                        self.meter_last_updated[serial_number] = dt_util.utcnow()
 
                 # Cost statistic (per-meter mode: sensor / static / off)
                 cost_config = cost_meters.get(serial_number)
@@ -344,7 +424,6 @@ class DukeEnergyCoordinator(DataUpdateCoordinator[None]):
                     continue
                 temp_accounts_seen.add(account_number)
 
-                src_acct_id = meter["account"]["srcAcctId"]
                 temperature_statistic_id = f"{DOMAIN}:account_{src_acct_id}_temperature"
                 self._statistic_ids.add(temperature_statistic_id)
 
@@ -398,8 +477,13 @@ class DukeEnergyCoordinator(DataUpdateCoordinator[None]):
                 async_add_external_statistics(
                     self.hass, temperature_metadata, temperature_statistics
                 )
+                if temperature_statistics:
+                    self._stats_queued = True
 
                 # --- End temperature statistic addition
+
+            if self.account_info:
+                await self._async_update_billing_payment_info()
 
             if do_backfill:
                 # One-shot: clear the flag now that history has been repriced, so
@@ -416,7 +500,27 @@ class DukeEnergyCoordinator(DataUpdateCoordinator[None]):
             ):
                 self._last_successful_date = today
 
+        except Exception:
+            self.status = STATUS_FAILED
+            # Explicit push: the coordinator skips its end-of-refresh notify
+            # on repeated failures, which would strand the sensor on fetching.
+            self.async_update_listeners()
+            raise
         finally:
+            self.last_poll_time = dt_util.utcnow()
+            if self.status != STATUS_FAILED:
+                if self._stats_queued:
+                    # Statistics are queued but not queryable (e.g. by the
+                    # energy dashboard) until the recorder commits them —
+                    # minutes, on an initial 3-year load. Flip when it does.
+                    self.status = STATUS_RECORDING
+                    self.config_entry.async_create_background_task(
+                        self.hass,
+                        self._async_wait_for_recorder(),
+                        name="duke_energy_recorder_wait",
+                    )
+                else:
+                    self.status = STATUS_COMPLETE
             had_success = self._last_successful_date == today
             if had_success:
                 _LOGGER.debug("Duke Energy data retrieval successful")
@@ -426,6 +530,157 @@ class DukeEnergyCoordinator(DataUpdateCoordinator[None]):
                     "will retry at next scheduled time"
                 )
             self._schedule_next_check(tz, had_success=had_success)
+
+    async def _async_wait_for_recorder(self) -> None:
+        """
+        Flip the status to complete once queued statistics are committed.
+
+        A SynchronizeTask is queued directly rather than via the recorder's
+        async_block_till_done helper, which returns early while an import is
+        mid-run (the task is dequeued before running and commits outside the
+        event session, so the queue looks idle). Queued serially behind the
+        imports, this task's future resolves only once they have committed and
+        the statistics are queryable. The guard skips the flip if another poll
+        has since moved the status on.
+        """
+        future = self.hass.loop.create_future()
+        get_instance(self.hass).queue_task(SynchronizeTask(future))
+        await future
+        if self.status == STATUS_RECORDING:
+            self.status = STATUS_COMPLETE
+            self.async_update_listeners()
+
+    async def _async_get_bill_cycle_start(
+        self, serial_number: str, src_acct_id: str
+    ) -> datetime | None:
+        """
+        Derive the current bill cycle's start from the MONTHLY usage graph.
+
+        The graph returns only completed cycles, so the current cycle starts
+        the day after the last entry's endDate. When the graph is unavailable,
+        the last derived start is reused while plausibly still current — a
+        cycle's start does not change mid-cycle, so a stale start is only
+        possible right around a rollover. With no plausible start at all,
+        None is returned and the caller reports this-cycle usage as unknown
+        rather than a wrong-window value.
+        """
+        tz = await dt_util.async_get_time_zone(_DUKE_TZ)
+        end = dt_util.now(tz) - timedelta(days=1)
+        # A ~2-month window guarantees at least one completed ~30-day cycle.
+        start = end - timedelta(days=62)
+        try:
+            result = await self.api.get_energy_usage(
+                serial_number, "MONTHLY", "YEAR", start, end
+            )
+            cycles = result["data"]
+            cycle_start = date.fromisoformat(cycles[-1]["endDate"]) + timedelta(days=1)
+        except DukeEnergyAuthError as err:
+            raise ConfigEntryAuthFailed from err
+        except (
+            TimeoutError,
+            ClientError,
+            IndexError,
+            KeyError,
+            TypeError,
+            ValueError,
+        ) as err:
+            cached = self._cycle_start_by_account.get(src_acct_id)
+            if (
+                cached is not None
+                and (end.date() - cached.date()).days < _CYCLE_START_MAX_AGE_DAYS
+            ):
+                _LOGGER.debug(
+                    "Billing cycle lookup failed for meter %s (%s); "
+                    "reusing cached cycle start %s",
+                    serial_number,
+                    err,
+                    cached.date(),
+                )
+                return cached
+            _LOGGER.warning(
+                "Could not derive the bill cycle start for meter %s: %s",
+                serial_number,
+                err,
+            )
+            return None
+
+        derived = datetime.combine(cycle_start, time.min)
+        self._cycle_start_by_account[src_acct_id] = derived
+        return derived
+
+    async def _async_update_monthly_usage(
+        self,
+        serial_number: str,
+        src_acct_id: str,
+        accounts_seen: set[str],
+        bill_cycle_starts: dict[str, datetime | None],
+    ) -> None:
+        """
+        Refresh a meter's bill-cycle usage summary (see sensor.py).
+
+        The billing cycle is account-wide, so its start is derived once per
+        account per poll (cached in ``bill_cycle_starts``) from the first
+        meter seen and shared by the account's meters. The summary's bill
+        amounts are likewise account-wide, so costs are stored once per
+        account from the first meter seen. A failure here only keeps the
+        previous values; it must not abort statistics ingestion.
+        """
+        if src_acct_id not in bill_cycle_starts:
+            bill_cycle_starts[src_acct_id] = await self._async_get_bill_cycle_start(
+                serial_number, src_acct_id
+            )
+        start_date = bill_cycle_starts[src_acct_id]
+
+        try:
+            summary = await self.api.get_monthly_usage(
+                serial_number, start_date=start_date
+            )
+        except DukeEnergyAuthError as err:
+            raise ConfigEntryAuthFailed from err
+        except (TimeoutError, ClientError) as err:
+            _LOGGER.warning(
+                "Could not fetch the bill-cycle summary for meter %s: %s",
+                serial_number,
+                err,
+            )
+            return
+
+        self.monthly_usage[serial_number] = {
+            # Without a cycle start the endpoint windows thisPeriod to just
+            # yesterday — a wrong-window value, so report unknown instead.
+            # The other periods are computed server-side regardless.
+            "this_cycle": (
+                _summary_value(summary, "thisPeriod", "totalUsage")
+                if start_date is not None
+                else None
+            ),
+            "last_cycle": _summary_value(summary, "lastPeriod", "totalUsage"),
+            "last_year": _summary_value(summary, "lastYearPeriod", "totalUsage"),
+        }
+        if src_acct_id not in accounts_seen:
+            accounts_seen.add(src_acct_id)
+            self.account_costs[src_acct_id] = {
+                "last_cycle": _summary_value(summary, "lastPeriod", "bill"),
+                "last_year": _summary_value(summary, "lastYearPeriod", "bill"),
+            }
+
+    async def _async_update_billing_payment_info(self) -> None:
+        """
+        Refresh billing and payment headline info for every account.
+
+        A single login-wide call (keyed by account number, closed accounts
+        included), so it runs once per poll rather than per meter. A failure
+        only keeps the previous values; it must not abort statistics ingestion.
+        """
+        try:
+            info = await self.api.get_billing_payment_info(include_closed=True)
+        except DukeEnergyAuthError as err:
+            raise ConfigEntryAuthFailed from err
+        except (TimeoutError, ClientError) as err:
+            _LOGGER.warning("Could not fetch billing and payment info: %s", err)
+            return
+
+        self.billing_payment_info = info
 
     @staticmethod
     def _stat_start(start: datetime, interval: str) -> datetime:
@@ -617,6 +872,8 @@ class DukeEnergyCoordinator(DataUpdateCoordinator[None]):
             self._cost_metadata(cost_statistic_id, name_prefix),
             cost_statistics,
         )
+        if cost_statistics:
+            self._stats_queued = True
 
     def _cost_metadata(
         self, cost_statistic_id: str, name_prefix: str

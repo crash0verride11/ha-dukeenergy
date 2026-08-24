@@ -6,7 +6,8 @@ import base64
 import json
 import time
 from collections.abc import Generator
-from unittest.mock import AsyncMock, Mock, patch
+from datetime import timedelta
+from unittest.mock import DEFAULT, AsyncMock, Mock, patch
 
 import pytest
 
@@ -20,7 +21,8 @@ def _make_id_token(
     email: str = "test@example.com",
     expires_in: int = 3600,
 ) -> str:
-    """Build a minimal unsigned JWT for testing.
+    """
+    Build a minimal unsigned JWT for testing.
 
     PyJWT's decode(options={"verify_signature": False}) only needs the
     base64-encoded header.payload segments to be valid JSON — the signature
@@ -110,6 +112,11 @@ def mock_recorder() -> Generator[Mock]:
 
     recorder_instance.async_add_executor_job = AsyncMock(side_effect=_passthrough)
     recorder_instance.async_clear_statistics = Mock()
+    # The coordinator's recorder wait queues a SynchronizeTask; resolve its
+    # future immediately so the status flips straight to complete.
+    recorder_instance.queue_task = Mock(
+        side_effect=lambda task: task.future.set_result(None)
+    )
 
     with (
         patch(
@@ -147,6 +154,7 @@ class StatsStore:
     def __init__(self) -> None:
         self.data: dict[str, list[dict]] = {}
         self.mock_add: Mock
+        self.recorder: Mock
 
     def seed(self, statistic_id: str, rows: list[dict]) -> None:
         """Preload rows (e.g. a price sensor's mean history) for a statistic."""
@@ -222,6 +230,11 @@ def stats_store() -> Generator[StatsStore]:
 
     recorder_instance.async_add_executor_job = AsyncMock(side_effect=_passthrough)
     recorder_instance.async_clear_statistics = Mock(side_effect=store.clear)
+    # The coordinator's recorder wait queues a SynchronizeTask; resolve its
+    # future immediately so the status flips straight to complete.
+    recorder_instance.queue_task = Mock(
+        side_effect=lambda task: task.future.set_result(None)
+    )
 
     with (
         patch(
@@ -242,7 +255,66 @@ def stats_store() -> Generator[StatsStore]:
         ),
     ):
         store.mock_add = mock_add
+        store.recorder = recorder_instance
         yield store
+
+
+# Completed billing cycles from the MONTHLY usage graph, oldest first. The
+# current cycle starts the day after the last entry's endDate.
+BILLING_CYCLES_PAYLOAD = [
+    {
+        "date": "2026-05",
+        "endDate": "2026-05-27",
+        "startDate": "2026-04-29",
+        "temperatureAvg": "62.94",
+        "usage": "853.644",
+    },
+    {
+        "date": "2026-06",
+        "endDate": "2026-06-26",
+        "startDate": "2026-05-28",
+        "temperatureAvg": "72.58",
+        "usage": "1098.43",
+    },
+]
+
+MONTHLY_USAGE_PAYLOAD = {
+    "lastPeriod": {
+        "averageTemp": "68",
+        "bill": 185.50,
+        "days": "30",
+        "totalUsage": 900.00,
+    },
+    "lastYearPeriod": {
+        "averageTemp": "75",
+        "bill": 310.00,
+        "days": "32",
+        "totalUsage": 1500.00,
+    },
+    "thisPeriod": {
+        "averageTemp": "72",
+        "bill": None,
+        "days": "0",
+        "totalUsage": 40.00,
+    },
+}
+
+# Billing and payment headline info, keyed by account number (as the library
+# returns it). Includes a closed account with no dueDate.
+BILLING_PAYMENT_PAYLOAD = {
+    "acct-1": {
+        "accountNumber": "acct-1",
+        "balance": 200.17,
+        "dueDate": "2024-05-22",
+        "abbreviatedBillStatus": "PAYMENT SCHEDULED",
+    },
+    "acct-2": {
+        "accountNumber": "acct-2",
+        "balance": 0.0,
+        "dueDate": None,
+        "abbreviatedBillStatus": "PAID",
+    },
+}
 
 
 @pytest.fixture
@@ -275,15 +347,38 @@ def mock_api() -> Generator[AsyncMock]:
             return_value=AsyncMock(),
         ),
     ):
+
+        def _energy_usage_dispatch(
+            _serial: str, interval: str, *_args: object, **_kwargs: object
+        ) -> object:
+            """Serve MONTHLY billing-cycle queries.
+
+            DEFAULT falls through to return_value, so tests can still
+            override the HOURLY/DAILY data.
+            """
+            if interval == "MONTHLY":
+                return {"data": BILLING_CYCLES_PAYLOAD, "missing": []}
+            return DEFAULT
+
         mock = mock_cls.return_value
         mock.get_meters = AsyncMock(return_value={})
-        mock.get_energy_usage = AsyncMock(return_value={"data": {}, "missing": []})
+        mock.get_energy_usage = AsyncMock(
+            return_value={"data": {}, "missing": []},
+            side_effect=_energy_usage_dispatch,
+        )
+        mock.get_monthly_usage = AsyncMock(return_value=MONTHLY_USAGE_PAYLOAD)
+        mock.get_billing_payment_info = AsyncMock(return_value=BILLING_PAYMENT_PAYLOAD)
         yield mock
 
 
 @pytest.fixture
 def mock_api_with_meters(mock_api: AsyncMock) -> AsyncMock:
-    """Extend mock_api with a single electric meter and one reading."""
+    """Extend mock_api with a single electric meter and one reading.
+
+    The reading is dated yesterday: the coordinator's fetch window ends at
+    yesterday midnight, so Duke never returns a reading for today, and only
+    a yesterday reading marks the poll (and the meter) as up to date.
+    """
     mock_api.get_meters.return_value = {
         "123": {
             "serialNum": "123",
@@ -294,7 +389,7 @@ def mock_api_with_meters(mock_api: AsyncMock) -> AsyncMock:
     }
     mock_api.get_energy_usage.return_value = {
         "data": {
-            dt_util.now(): {
+            dt_util.now() - timedelta(days=1): {
                 "energy": 1.3,
                 "temperature": 70,
             }
@@ -316,7 +411,7 @@ def mock_api_with_gas_meter(mock_api: AsyncMock) -> AsyncMock:
         },
     }
     mock_api.get_energy_usage.return_value = {
-        "data": {dt_util.now(): {"energy": 2.5, "temperature": 68}},
+        "data": {dt_util.now() - timedelta(days=1): {"energy": 2.5, "temperature": 68}},
         "missing": [],
     }
     return mock_api

@@ -1,6 +1,19 @@
 """Constants for the Duke Energy integration."""
 
+from homeassistant.const import Platform
+
 DOMAIN = "duke_energy"
+
+PLATFORMS = [Platform.SENSOR]
+
+# Update-phase values surfaced by the account Status sensor (see sensor.py).
+# "recording" means statistics are queued but the recorder has not committed
+# them yet, so they are not visible to the energy dashboard until "complete".
+STATUS_FETCHING = "fetching"
+STATUS_RECORDING = "recording"
+STATUS_COMPLETE = "complete"
+STATUS_FAILED = "failed"
+STATUS_OPTIONS = [STATUS_FETCHING, STATUS_RECORDING, STATUS_COMPLETE, STATUS_FAILED]
 
 # Auth0 OAuth2 configuration for Duke Energy
 OAUTH2_AUTHORIZE = "https://login.duke-energy.com/authorize"

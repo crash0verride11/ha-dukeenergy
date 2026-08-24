@@ -22,6 +22,7 @@ async def test_setup_entry(
     hass: HomeAssistant,
     mock_config_entry: MockConfigEntry,
     mock_recorder: object,
+    auto_enable_custom_integrations: None,
 ) -> None:
     """async_setup_entry wires auth → client → coordinator and returns True."""
     mock_config_entry.add_to_hass(hass)
@@ -47,7 +48,11 @@ async def test_setup_entry(
             new_callable=AsyncMock,
         ),
     ):
-        result = await async_setup_entry(hass, mock_config_entry)
+        # Forwarding the sensor platform requires the setup lock, which the
+        # config entries manager holds during a real setup.
+        async with mock_config_entry.setup_lock:
+            result = await async_setup_entry(hass, mock_config_entry)
+        await hass.async_block_till_done()
 
     assert result is True
 
