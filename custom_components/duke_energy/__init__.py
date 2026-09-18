@@ -3,14 +3,16 @@
 from __future__ import annotations
 
 import logging
+from http import HTTPStatus
 from typing import TYPE_CHECKING
 
 from aiodukeenergy_co import DukeEnergy
+from aiohttp import ClientError, ClientResponseError
 from homeassistant.components.recorder import (
     get_instance,  # pyright: ignore[reportPrivateImportUsage]
 )
 from homeassistant.components.recorder.statistics import list_statistic_ids
-from homeassistant.exceptions import ConfigEntryAuthFailed
+from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
 from homeassistant.helpers import aiohttp_client, config_entry_oauth2_flow
 
 from .api import DukeEnergyAuth
@@ -45,9 +47,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: DukeEnergyConfigEntry) -
     )
     session = config_entry_oauth2_flow.OAuth2Session(hass, entry, implementation)
 
+    # Only a rejected refresh (4xx) or an unusable id_token is an auth
+    # failure; a network or Auth0 outage should retry setup, not prompt reauth.
     try:
         await session.async_ensure_token_valid()
-    except Exception as err:
+    except ClientResponseError as err:
+        if HTTPStatus.BAD_REQUEST <= err.status < HTTPStatus.INTERNAL_SERVER_ERROR:
+            raise ConfigEntryAuthFailed from err
+        raise ConfigEntryNotReady from err
+    except ClientError as err:
+        raise ConfigEntryNotReady from err
+    except ValueError as err:
+        # oauth.py:_adjust_token_expiry — id_token missing or undecodable.
         raise ConfigEntryAuthFailed from err
 
     auth = DukeEnergyAuth(aiohttp_client.async_get_clientsession(hass), session)

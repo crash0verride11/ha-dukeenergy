@@ -6,9 +6,10 @@ import pytest
 
 from unittest.mock import AsyncMock, Mock, patch
 
+from aiohttp import ClientConnectorError, ClientResponseError
 from homeassistant.config_entries import ConfigEntryState
 from homeassistant.core import HomeAssistant
-from homeassistant.exceptions import ConfigEntryAuthFailed
+from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
 
 from homeassistant.helpers.config_entry_oauth2_flow import OAuth2Session
 
@@ -88,7 +89,7 @@ async def test_setup_entry_raises_on_token_validation_failure(
     hass: HomeAssistant,
     mock_config_entry: MockConfigEntry,
 ) -> None:
-    """async_setup_entry raises ConfigEntryAuthFailed when token refresh fails."""
+    """async_setup_entry raises ConfigEntryAuthFailed when Auth0 rejects the refresh."""
     mock_config_entry.add_to_hass(hass)
 
     with (
@@ -98,9 +99,39 @@ async def test_setup_entry_raises_on_token_validation_failure(
         ),
         patch(
             "homeassistant.helpers.config_entry_oauth2_flow.OAuth2Session.async_ensure_token_valid",
-            side_effect=Exception("token expired"),
+            side_effect=ClientResponseError(Mock(), (), status=401),
         ),
         pytest.raises(ConfigEntryAuthFailed),
+    ):
+        await async_setup_entry(hass, mock_config_entry)
+
+
+@pytest.mark.parametrize(
+    "refresh_error",
+    [
+        ClientResponseError(Mock(), (), status=503),
+        ClientConnectorError(Mock(), OSError("dns")),
+    ],
+    ids=["auth0_5xx", "network"],
+)
+async def test_setup_entry_token_refresh_outage_not_ready(
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+    refresh_error: Exception,
+) -> None:
+    """A transient refresh failure retries setup rather than prompting reauth."""
+    mock_config_entry.add_to_hass(hass)
+
+    with (
+        patch(
+            "homeassistant.helpers.config_entry_oauth2_flow.async_get_config_entry_implementation",
+            return_value=AsyncMock(),
+        ),
+        patch(
+            "homeassistant.helpers.config_entry_oauth2_flow.OAuth2Session.async_ensure_token_valid",
+            side_effect=refresh_error,
+        ),
+        pytest.raises(ConfigEntryNotReady),
     ):
         await async_setup_entry(hass, mock_config_entry)
 
