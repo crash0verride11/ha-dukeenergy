@@ -101,7 +101,7 @@ wheels = [
 
 [[package]]
 name = "aiodukeenergy-co"
-version = "1.2.0"
+version = "1.3.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "aiohttp", version = "3.11.16", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.13.2'" },
@@ -112,9 +112,9 @@ dependencies = [
     { name = "yarl", version = "1.22.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.13.2' and python_full_version < '3.14.2'" },
     { name = "yarl", version = "1.23.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.14.2'" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/d6/e1/832a56b3bad91b31d1d7aed843c76e14b0b007558cba28c205a6395e856c/aiodukeenergy_co-1.2.0.tar.gz", hash = "sha256:2b1369b88c742d5c53d355d711ae195d4713312c7ed8ad0b81b26200a236c81f", size = 17772, upload-time = "2026-07-16T04:45:00.152Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/57/f9/9549eebea5474906552c73666ee154e94656fbe475253af1a310e19f4d01/aiodukeenergy_co-1.3.0.tar.gz", hash = "sha256:4ff314305c7b5579cb60e3b9f617bd96e52f0e682f4cd760e7b0d2c07f6747e0", size = 18037, upload-time = "2026-09-17T23:10:23.463Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/49/fc/6f8ce5944a0286eaf7321dffd2c5e0bdafb7ac34d51224d1ecd2543e85a5/aiodukeenergy_co-1.2.0-py3-none-any.whl", hash = "sha256:1a5c5122cbad0ed86290aac93f4d69d5a9e3dd614addcca4f383e69faefa3499", size = 17630, upload-time = "2026-07-16T04:44:59.09Z" },
+    { url = "https://files.pythonhosted.org/packages/a0/60/8010d7683a9de430e402132534c340b9762806df8add76c82edccfc68ace/aiodukeenergy_co-1.3.0-py3-none-any.whl", hash = "sha256:b60b8e4ac873bf35d591c25a6a77450cba6fd06eb3d33845995665bc9544b823", size = 17958, upload-time = "2026-09-17T23:10:22.284Z" },
 ]
 
 [[package]]
@@ -1754,7 +1754,7 @@ dev = [
 
 [package.metadata.requires-dev]
 dev = [
-    { name = "aiodukeenergy-co", specifier = "==1.2.0" },
+    { name = "aiodukeenergy-co", specifier = "==1.3.0" },
     { name = "freezegun", specifier = ">=1.5" },
     { name = "pyjwt", specifier = ">=2.8" },
     { name = "pytest", specifier = ">=8.3" },
