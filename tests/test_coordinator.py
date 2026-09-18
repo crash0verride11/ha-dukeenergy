@@ -8,9 +8,13 @@ from zoneinfo import ZoneInfo
 
 from freezegun.api import FrozenDateTimeFactory
 
+from aiodukeenergy_co import DukeEnergyAuthError, DukeEnergyBlockedError
 from homeassistant.components.recorder.models import StatisticMeanType
+from homeassistant.config_entries import SOURCE_REAUTH, ConfigEntryState
 from homeassistant.const import UnitOfEnergy, UnitOfVolume
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import ConfigEntryAuthFailed
+from homeassistant.helpers.update_coordinator import UpdateFailed
 from homeassistant.util.unit_conversion import EnergyConverter
 
 from pytest_homeassistant_custom_component.common import (
@@ -18,6 +22,7 @@ from pytest_homeassistant_custom_component.common import (
     async_fire_time_changed,
 )
 
+from custom_components.duke_energy.const import DOMAIN, STATUS_FAILED
 from custom_components.duke_energy.coordinator import DukeEnergyCoordinator
 
 from .conftest import StatsStore
@@ -117,6 +122,53 @@ async def test_update(
     assert mock_api_with_meters.get_meters.call_count == 2
     _, incremental_stats = _call_for(stats_store, consumption_id)
     assert incremental_stats == []
+
+
+async def test_blocked_request_fails_poll_without_reauth(
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+    mock_api_with_meters: AsyncMock,
+    auto_enable_custom_integrations: None,
+) -> None:
+    """An edge/WAF refusal is a failed poll, not an auth failure: no reauth."""
+    mock_config_entry.add_to_hass(hass)
+    mock_config_entry.mock_state(hass, ConfigEntryState.LOADED)
+    mock_api_with_meters.get_meters.side_effect = DukeEnergyBlockedError("403")
+    coordinator = DukeEnergyCoordinator(hass, mock_api_with_meters, mock_config_entry)
+
+    await coordinator.async_refresh()
+    await hass.async_block_till_done()
+
+    assert coordinator.last_update_success is False
+    assert isinstance(coordinator.last_exception, UpdateFailed)
+    assert coordinator.status == STATUS_FAILED
+    assert not hass.config_entries.flow.async_progress_by_handler(
+        DOMAIN, match_context={"source": SOURCE_REAUTH}
+    )
+
+
+async def test_auth_error_starts_reauth(
+    recorder_mock: object,
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+    mock_api_with_meters: AsyncMock,
+    auto_enable_custom_integrations: None,
+) -> None:
+    """A rejected token is still an auth failure and starts the reauth flow."""
+    mock_config_entry.add_to_hass(hass)
+    mock_config_entry.mock_state(hass, ConfigEntryState.LOADED)
+    mock_api_with_meters.get_meters.side_effect = DukeEnergyAuthError("401")
+    coordinator = DukeEnergyCoordinator(hass, mock_api_with_meters, mock_config_entry)
+
+    await coordinator.async_refresh()
+    await hass.async_block_till_done()
+
+    assert coordinator.last_update_success is False
+    assert isinstance(coordinator.last_exception, ConfigEntryAuthFailed)
+    assert coordinator.status == STATUS_FAILED
+    assert hass.config_entries.flow.async_progress_by_handler(
+        DOMAIN, match_context={"source": SOURCE_REAUTH}
+    )
 
 
 async def test_gas_meter_update(

@@ -3,12 +3,13 @@
 import hashlib
 import logging
 from bisect import bisect_right
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, tzinfo
 from typing import Any, cast
 
-from aiodukeenergy_co import DukeEnergy, DukeEnergyAuthError
+from aiodukeenergy_co import DukeEnergy, DukeEnergyAuthError, DukeEnergyBlockedError
 from aiohttp import ClientError
 from homeassistant.components.recorder import (
     get_instance,  # pyright: ignore[reportPrivateImportUsage]
@@ -35,7 +36,10 @@ from homeassistant.const import (
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers.event import async_track_point_in_time
-from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
+from homeassistant.helpers.update_coordinator import (
+    DataUpdateCoordinator,
+    UpdateFailed,
+)
 from homeassistant.util import dt as dt_util
 from homeassistant.util.unit_conversion import EnergyConverter
 
@@ -77,6 +81,24 @@ class MeterInfo:
 
     service_type: str
     src_acct_id: str
+
+
+@contextmanager
+def _translate_auth_errors() -> Iterator[None]:
+    """
+    Translate library auth errors for the coordinator.
+
+    A rejected token is an auth failure and triggers reauth. A request the
+    CDN refused before it reached Duke's API is not — so it is reported as
+    a failed poll and retried on the next schedule.
+    """
+    try:
+        yield
+    except DukeEnergyBlockedError as err:
+        msg = f"Duke Energy refused the request: {err}"
+        raise UpdateFailed(msg) from err
+    except DukeEnergyAuthError as err:
+        raise ConfigEntryAuthFailed from err
 
 
 def _summary_value(summary: dict[str, Any], period: str, key: str) -> float | None:
@@ -281,10 +303,8 @@ class DukeEnergyCoordinator(DataUpdateCoordinator[None]):
                 _LOGGER.debug("Already retrieved today's data, skipping until tomorrow")
                 return
 
-            try:
+            with _translate_auth_errors():
                 meters: dict[str, dict[str, Any]] = await self.api.get_meters()
-            except DukeEnergyAuthError as err:
-                raise ConfigEntryAuthFailed from err
 
             for serial_number, meter in meters.items():
                 if (
@@ -569,13 +589,12 @@ class DukeEnergyCoordinator(DataUpdateCoordinator[None]):
         # A ~2-month window guarantees at least one completed ~30-day cycle.
         start = end - timedelta(days=62)
         try:
-            result = await self.api.get_energy_usage(
-                serial_number, "MONTHLY", "YEAR", start, end
-            )
+            with _translate_auth_errors():
+                result = await self.api.get_energy_usage(
+                    serial_number, "MONTHLY", "YEAR", start, end
+                )
             cycles = result["data"]
             cycle_start = date.fromisoformat(cycles[-1]["endDate"]) + timedelta(days=1)
-        except DukeEnergyAuthError as err:
-            raise ConfigEntryAuthFailed from err
         except (
             TimeoutError,
             ClientError,
@@ -632,11 +651,10 @@ class DukeEnergyCoordinator(DataUpdateCoordinator[None]):
         start_date = bill_cycle_starts[src_acct_id]
 
         try:
-            summary = await self.api.get_monthly_usage(
-                serial_number, start_date=start_date
-            )
-        except DukeEnergyAuthError as err:
-            raise ConfigEntryAuthFailed from err
+            with _translate_auth_errors():
+                summary = await self.api.get_monthly_usage(
+                    serial_number, start_date=start_date
+                )
         except (TimeoutError, ClientError) as err:
             _LOGGER.warning(
                 "Could not fetch the bill-cycle summary for meter %s: %s",
@@ -673,9 +691,8 @@ class DukeEnergyCoordinator(DataUpdateCoordinator[None]):
         only keeps the previous values; it must not abort statistics ingestion.
         """
         try:
-            info = await self.api.get_billing_payment_info(include_closed=True)
-        except DukeEnergyAuthError as err:
-            raise ConfigEntryAuthFailed from err
+            with _translate_auth_errors():
+                info = await self.api.get_billing_payment_info(include_closed=True)
         except (TimeoutError, ClientError) as err:
             _LOGGER.warning("Could not fetch billing and payment info: %s", err)
             return
@@ -1110,7 +1127,7 @@ class DukeEnergyCoordinator(DataUpdateCoordinator[None]):
             )
             try:
                 # Get data
-                try:
+                with _translate_auth_errors():
                     results = await self.api.get_energy_usage(
                         meter["serialNum"],
                         run_interval,
@@ -1118,8 +1135,6 @@ class DukeEnergyCoordinator(DataUpdateCoordinator[None]):
                         start_step,
                         end_step,
                     )
-                except DukeEnergyAuthError as err:
-                    raise ConfigEntryAuthFailed from err
 
                 usage = {**results["data"], **usage}
 
