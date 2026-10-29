@@ -422,8 +422,8 @@ class DukeEnergyCoordinator(DataUpdateCoordinator[None]):
                     self._stats_queued = True
                     if has_yesterday_data:
                         # Only the newest day counts as a change: every
-                        # update writes rows for polled period while 
-                        # Duke still has nothing for yesterday. 
+                        # update writes rows for polled period while
+                        # Duke still has nothing for yesterday.
                         self.meter_last_updated[serial_number] = dt_util.utcnow()
 
                 # Cost statistic (per-meter mode: sensor / static / off)
