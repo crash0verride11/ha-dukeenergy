@@ -28,3 +28,7 @@ AUTH0_CLIENT = "eyJuYW1lIjoiQXV0aDAuc3dpZnQiLCJlbnYiOnsiaU9TIjoiMjYuMiIsInN3aWZ0
 
 # Mobile app redirect URI - required by Duke Energy Auth0 config
 MOBILE_REDIRECT_URI = "https://login.duke-energy.com/ios/com.duke-energy.app/callback"
+
+# iPhone Safari User-Agent that gets past Duke's desktop-browser check. Keep in
+# sync with the browser extension's rules.json, which injects the same value.
+IOS_USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.6 Mobile/15E148 Safari/604.1"  # noqa: E501

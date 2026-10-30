@@ -26,9 +26,13 @@ from homeassistant.helpers.selector import (
     SelectSelector,
     SelectSelectorConfig,
     SelectSelectorMode,
+    TextSelector,
+    TextSelectorConfig,
+    TextSelectorType,
 )
+from yarl import URL
 
-from .const import DOMAIN
+from .const import DOMAIN, IOS_USER_AGENT
 from .coordinator import _SUPPORTED_METER_TYPES, DukeEnergyConfigEntry
 from .oauth import DukeEnergyOAuth2Implementation
 
@@ -37,17 +41,61 @@ if TYPE_CHECKING:
 
 _LOGGER = logging.getLogger(__name__)
 
+CONF_CALLBACK_URL = "callback_url"
+
+# Translation keys under `config.error` in strings.json.
+ERROR_AUTHORIZE_REJECTED = "authorize_rejected"
+ERROR_INVALID_CALLBACK_URL = "invalid_callback_url"
+ERROR_STATE_MISMATCH = "state_mismatch"
+
+STEP_AUTH_MANUAL_SCHEMA = vol.Schema(
+    {
+        vol.Required(CONF_CALLBACK_URL): TextSelector(
+            TextSelectorConfig(type=TextSelectorType.URL)
+        )
+    }
+)
+
+
+class InvalidCallbackURLError(Exception):
+    """Raised when the pasted callback URL cannot be used."""
+
+    def __init__(self, error_key: str) -> None:
+        """Initialize with the translation key describing the problem."""
+        super().__init__(error_key)
+        self.error_key = error_key
+
 
 class DukeEnergyOAuth2FlowHandler(
     config_entry_oauth2_flow.AbstractOAuth2FlowHandler,
     domain=DOMAIN,
 ):
-    """Handle a config flow for Duke Energy."""
+    """
+    Handle a config flow for Duke Energy.
+
+    Sign-in starts at a menu with two paths:
+
+    - ``auth``: the stock external step, where the browser extension forwards
+      the callback to HA's OAuth callback view, which resumes the flow;
+    - ``auth_manual``: the user opens the authorize URL themselves and pastes
+      back the callback address Duke redirects to.
+
+    They must be separate steps chosen up front: an external step can only
+    transition to another external step, so it cannot fall back to a form. Nor
+    can the paste form also accept the forwarded callback, because only
+    external steps notify the frontend when the flow advances.
+    """
 
     VERSION = 2
     MINOR_VERSION = 1
 
     DOMAIN = DOMAIN
+
+    def __init__(self) -> None:
+        """Initialize the Duke Energy config flow."""
+        super().__init__()
+        self._authorize_url: str | None = None
+        self._expected_state: str | None = None
 
     @property
     def logger(self) -> logging.Logger:
@@ -66,8 +114,85 @@ class DukeEnergyOAuth2FlowHandler(
         self, _: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
         """Handle picking implementation - directly use our implementation."""
-        self.flow_impl = DukeEnergyOAuth2Implementation(self.hass)
-        return await self.async_step_auth()
+        # Create the implementation once per flow: it holds the PKCE verifier
+        # that the token exchange must send, so replacing it after an authorize
+        # URL was issued would fail the exchange with invalid_grant.
+        if self.flow_impl is None:
+            self.flow_impl = DukeEnergyOAuth2Implementation(self.hass)
+        return await self.async_step_pick_method()
+
+    async def async_step_pick_method(
+        self, _: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Offer the browser extension or the manual paste sign-in."""
+        return self.async_show_menu(
+            step_id="pick_method",
+            menu_options=["auth", "auth_manual"],
+        )
+
+    async def async_step_auth_manual(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Show the authorize URL and accept the pasted callback URL."""
+        if self._authorize_url is None:
+            self._authorize_url = await self.async_generate_authorize_url()
+            self._expected_state = URL(self._authorize_url).query.get("state")
+
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            try:
+                self.external_data = self._parse_callback_url(
+                    user_input[CONF_CALLBACK_URL]
+                )
+            except InvalidCallbackURLError as err:
+                errors["base"] = err.error_key
+            else:
+                return await self.async_step_creation()
+
+        return self.async_show_form(
+            step_id="auth_manual",
+            data_schema=STEP_AUTH_MANUAL_SCHEMA,
+            description_placeholders={
+                "authorize_url": self._authorize_url,
+                "user_agent": IOS_USER_AGENT,
+            },
+            errors=errors,
+        )
+
+    def _parse_callback_url(self, raw_url: str) -> dict[str, Any]:
+        """
+        Turn the pasted callback URL into OAuth2 external data.
+
+        Returns a mapping shaped like the one the OAuth callback view hands the
+        flow: the authorization code plus the decoded state.
+
+        Raises:
+            InvalidCallbackURLError: If the URL is unusable, carries an
+                authorization error, lacks a code, or does not match the state
+                issued for this flow.
+
+        """
+        try:
+            query = URL(raw_url.strip()).query
+        except ValueError as err:
+            raise InvalidCallbackURLError(ERROR_INVALID_CALLBACK_URL) from err
+
+        if "error" in query:
+            raise InvalidCallbackURLError(ERROR_AUTHORIZE_REJECTED)
+
+        if not (code := query.get("code")):
+            raise InvalidCallbackURLError(ERROR_INVALID_CALLBACK_URL)
+
+        if not self._expected_state or query.get("state") != self._expected_state:
+            raise InvalidCallbackURLError(ERROR_STATE_MISMATCH)
+
+        return {
+            "code": code,
+            "state": {
+                "flow_id": self.flow_id,
+                "redirect_uri": self.flow_impl.redirect_uri,
+            },
+        }
 
     async def async_step_reauth(self, _: Mapping[str, Any]) -> ConfigFlowResult:
         """Perform reauth upon an API authentication error."""

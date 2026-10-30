@@ -9,13 +9,19 @@ from contextlib import contextmanager
 from typing import Any
 from unittest.mock import AsyncMock, Mock, patch
 
+from yarl import URL
+
 from homeassistant import config_entries
 from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResultType
 
 # Importing the flow handler registers it in config_entries.HANDLERS["duke_energy"].
 from custom_components.duke_energy.config_flow import DukeEnergyOAuth2FlowHandler  # noqa: F401
-from custom_components.duke_energy.const import DOMAIN
+from custom_components.duke_energy.const import (
+    DOMAIN,
+    IOS_USER_AGENT,
+    MOBILE_REDIRECT_URI,
+)
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 
@@ -54,6 +60,21 @@ def _make_oauth_data(id_token: str | None = None) -> dict[str, Any]:
             "expires_at": time.time() + 3600,
         },
     }
+
+
+_RESOLVE_EXTERNAL_DATA = (
+    "custom_components.duke_energy.oauth.DukeEnergyOAuth2Implementation"
+    ".async_resolve_external_data"
+)
+
+
+def _callback_url(authorize_url: str, **query: str) -> str:
+    """Build Duke's callback URL using the state issued for this flow."""
+    return str(
+        URL(MOBILE_REDIRECT_URI).with_query(
+            {"state": URL(authorize_url).query["state"], **query}
+        )
+    )
 
 
 def _make_flow(
@@ -147,6 +168,10 @@ async def test_abort_if_already_configured(
         result = await hass.config_entries.flow.async_init(
             DOMAIN, context={"source": config_entries.SOURCE_USER}
         )
+        assert result["type"] is FlowResultType.MENU
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {"next_step_id": "auth"}
+        )
         assert result["type"] is FlowResultType.EXTERNAL_STEP
 
         result = await hass.config_entries.flow.async_configure(
@@ -192,8 +217,14 @@ async def test_reauth_success(
         assert result["type"] is FlowResultType.FORM
         assert result["step_id"] == "reauth_confirm"
 
-        # Submit the confirm form — advances to pick_implementation → auth step.
+        # Submit the confirm form — advances to the sign-in menu.
         result = await hass.config_entries.flow.async_configure(result["flow_id"], {})
+        assert result["type"] is FlowResultType.MENU
+        assert result["step_id"] == "pick_method"
+
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {"next_step_id": "auth"}
+        )
         assert result["type"] is FlowResultType.EXTERNAL_STEP
 
         # Simulate the OAuth redirect callback.
@@ -204,6 +235,173 @@ async def test_reauth_success(
 
         # Final step: resolve token → async_oauth_create_entry → update entry.
         result = await hass.config_entries.flow.async_configure(result["flow_id"])
+
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "reauth_successful"
+
+
+# ---------------------------------------------------------------------------
+# Manual sign-in — the user pastes Duke's callback URL into the form.
+# ---------------------------------------------------------------------------
+
+
+async def _start_manual(hass: HomeAssistant) -> dict:
+    """Start a user flow and pick the manual sign-in from the menu."""
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN, context={"source": config_entries.SOURCE_USER}
+    )
+    assert result["type"] is FlowResultType.MENU
+    assert result["menu_options"] == ["auth", "auth_manual"]
+    return await hass.config_entries.flow.async_configure(
+        result["flow_id"], {"next_step_id": "auth_manual"}
+    )
+
+
+async def test_manual_paste_creates_entry(
+    recorder_mock: object,
+    enable_custom_integrations: object,
+    hass: HomeAssistant,
+    mock_setup_entry: AsyncMock,
+) -> None:
+    """Pasting the callback URL completes a fresh setup."""
+    with patch(
+        _RESOLVE_EXTERNAL_DATA, return_value=_make_oauth_data()["token"]
+    ) as mock_resolve:
+        result = await _start_manual(hass)
+        assert result["type"] is FlowResultType.FORM
+        assert result["step_id"] == "auth_manual"
+        assert result["description_placeholders"]["user_agent"] == IOS_USER_AGENT
+        authorize_url = result["description_placeholders"]["authorize_url"]
+
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"],
+            {"callback_url": _callback_url(authorize_url, code="auth-code")},
+        )
+
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert result["title"] == "test@example.com"
+    # Same shape the OAuth callback view would have handed the flow.
+    external_data = mock_resolve.call_args.args[0]
+    assert external_data["code"] == "auth-code"
+    assert external_data["state"]["redirect_uri"] == MOBILE_REDIRECT_URI
+
+
+async def test_manual_reuses_authorize_url_after_error(
+    recorder_mock: object,
+    enable_custom_integrations: object,
+    hass: HomeAssistant,
+    mock_setup_entry: AsyncMock,
+) -> None:
+    """A rejected paste re-shows the same authorize URL (same PKCE challenge)."""
+    result = await _start_manual(hass)
+    authorize_url = result["description_placeholders"]["authorize_url"]
+
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {"callback_url": "not a url"}
+    )
+
+    assert result["type"] is FlowResultType.FORM
+    assert result["description_placeholders"]["authorize_url"] == authorize_url
+
+
+async def test_manual_paste_rejects_authorization_error(
+    recorder_mock: object,
+    enable_custom_integrations: object,
+    hass: HomeAssistant,
+    mock_setup_entry: AsyncMock,
+) -> None:
+    """Duke returning access_denied is reported on the form, not a crash."""
+    result = await _start_manual(hass)
+    authorize_url = result["description_placeholders"]["authorize_url"]
+
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"],
+        {"callback_url": _callback_url(authorize_url, error="access_denied")},
+    )
+
+    assert result["type"] is FlowResultType.FORM
+    assert result["errors"] == {"base": "authorize_rejected"}
+
+
+async def test_manual_paste_rejects_wrong_state(
+    recorder_mock: object,
+    enable_custom_integrations: object,
+    hass: HomeAssistant,
+    mock_setup_entry: AsyncMock,
+) -> None:
+    """A URL from another sign-in attempt is rejected instead of exchanged."""
+    result = await _start_manual(hass)
+
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"],
+        {
+            "callback_url": str(
+                URL(MOBILE_REDIRECT_URI).with_query(
+                    {"code": "auth-code", "state": "stale"}
+                )
+            )
+        },
+    )
+
+    assert result["type"] is FlowResultType.FORM
+    assert result["errors"] == {"base": "state_mismatch"}
+
+
+async def test_manual_paste_rejects_missing_code(
+    recorder_mock: object,
+    enable_custom_integrations: object,
+    hass: HomeAssistant,
+    mock_setup_entry: AsyncMock,
+) -> None:
+    """A URL without a code is rejected with a copy-the-address message."""
+    result = await _start_manual(hass)
+    authorize_url = result["description_placeholders"]["authorize_url"]
+
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {"callback_url": _callback_url(authorize_url)}
+    )
+
+    assert result["type"] is FlowResultType.FORM
+    assert result["errors"] == {"base": "invalid_callback_url"}
+
+
+async def test_reauth_manual_paste(
+    recorder_mock: object,
+    enable_custom_integrations: object,
+    hass: HomeAssistant,
+    mock_setup_entry: AsyncMock,
+) -> None:
+    """Reauth offers the same menu and completes through the manual path."""
+    existing = MockConfigEntry(
+        domain=DOMAIN,
+        unique_id="test-user-id",
+        title="test@example.com",
+        version=2,
+        minor_version=1,
+        data=_make_oauth_data(),
+    )
+    existing.add_to_hass(hass)
+
+    with patch(_RESOLVE_EXTERNAL_DATA, return_value=_make_oauth_data()["token"]):
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN,
+            context={
+                "source": config_entries.SOURCE_REAUTH,
+                "entry_id": existing.entry_id,
+            },
+            data=existing.data,
+        )
+        result = await hass.config_entries.flow.async_configure(result["flow_id"], {})
+        assert result["type"] is FlowResultType.MENU
+
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {"next_step_id": "auth_manual"}
+        )
+        authorize_url = result["description_placeholders"]["authorize_url"]
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"],
+            {"callback_url": _callback_url(authorize_url, code="auth-code")},
+        )
 
     assert result["type"] is FlowResultType.ABORT
     assert result["reason"] == "reauth_successful"
