@@ -21,10 +21,10 @@ In November 2025, Duke Energy migrated their API authentication to use Auth0 whi
 
 ## Install
 > [!IMPORTANT]
-> A browser extension is required to successfully authenticate with Duke Energy. Do not skip this step!
+> A browser extension is recommended for easy authentication with Duke Energy, but a manual option is now available, instructions below.
 
 ### Chrome Extension
-> The chrome extension is tied to the folder location on your computer
+> The chrome extension is tied to the folder location on your computer.
 
 1. Download the latest chrome extension from the aiodukeenergy release page [here](https://github.com/crash0verride11/ha-dukeenergy/releases/latest/download/chrome-extension.zip).
 2. Extract the folder from zip if downloaded.
@@ -49,6 +49,45 @@ In November 2025, Duke Energy migrated their API authentication to use Auth0 whi
 
 [![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=crash0verride11&repository=ha-dukeenergy&category=integration)
 
+
+### Manual Authentication
+> On non-iOS devices, manually configuring the browser's user agent is required.
+
+Manual sign-in is adapted from [sam2kb](https://github.com/sam2kb/ha-dukeenergy)'s fork, which built on [Jordan Dahmen](https://github.com/jdahmen)'s manual callback-URL flow ([hunterjm/ha-dukeenergy#57](https://github.com/hunterjm/ha-dukeenergy/pull/57)).
+
+1. Make Duke see a phone. Duke rejects desktop browsers after authentication:
+   - **Firefox:** `about:config` → add a **String** named
+     `general.useragent.override` with the iPhone value below. Firefox has no
+     per-site override, so reset the pref when you are done.
+   - **Safari:** enable the Develop menu, then
+     **Develop → User Agent → Safari — iOS 18 — iPhone**.
+   - **Chrome/Edge:** DevTools (`F12`) → device toolbar (`Ctrl+Shift+M`) →
+     iPhone.
+2. Start the integration (or reauthentication), choose **Guided manual
+   sign-in**, and open the sign-in link in that tab. Sign in.
+3. Duke lands on a "Not Found" page whose address ends in `?code=…&state=…`.
+4. Copy the **entire** address and paste it into **Callback URL**.
+5. If the page says `access_denied`, the browser still looked like a desktop;
+   repeat from step 1 with a fresh sign-in link.
+
+Keep the setup form open until you submit the URL. Treat that URL as a sign-in
+credential and keep it out of issue reports and screenshots. Restore your usual
+User-Agent when you are done.
+
+iPhone User-Agent:
+
+```
+Mozilla/5.0 (iPhone; CPU iPhone OS 18_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.6 Mobile/15E148 Safari/604.1
+```
+
+#### If the sign-in fails
+
+| What you see | Cause | What to do |
+| --- | --- | --- |
+| `access_denied` / "An error has occurred" instead of a code | Duke's login still saw a desktop browser | Apply the mobile User-Agent, then start a fresh sign-in |
+| "Not Found" page with `code` and `state` in the address | This is the expected landing page | Copy the whole address into **Callback URL** |
+| No `code` in the address | Sign-in did not complete | Reopen the current setup form's sign-in link with the mobile User-Agent applied |
+| "That URL belongs to a different sign-in attempt" | The pasted URL came from an older flow | Open the sign-in link from the current form again and paste the new address |
 
 ## Configuration
 
