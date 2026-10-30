@@ -1,0 +1,35 @@
+{
+  "schemaVersion": 1,
+  "id": "duke-energy",
+  "name": "Duke Energy",
+  "description": "Captures the Auth0 mobile-app redirect from Duke Energy's login (cma-prod:// custom scheme, plus the iOS https callback) and forwards the authorization code to Home Assistant. Presents an iPhone Safari User-Agent on the login site, which rejects desktop browsers after the password step.",
+  "loginOrigins": [
+    "https://login.duke-energy.com/*"
+  ],
+  "capture": [
+    {
+      "type": "redirect",
+      "redirectPrefixes": [
+        "cma-prod://",
+        "https://login.duke-energy.com/ios/"
+      ]
+    }
+  ],
+  "state": { "rule": "ha-jwt" },
+  "requestHeaders": [
+    {
+      "header": "User-Agent",
+      "operation": "set",
+      "value": "Mozilla/5.0 (iPhone; CPU iPhone OS 18_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.6 Mobile/15E148 Safari/604.1"
+    },
+    { "header": "Sec-CH-UA", "operation": "remove" },
+    { "header": "Sec-CH-UA-Mobile", "operation": "remove" },
+    { "header": "Sec-CH-UA-Platform", "operation": "remove" },
+    { "header": "Sec-CH-UA-Platform-Version", "operation": "remove" },
+    { "header": "Sec-CH-UA-Full-Version-List", "operation": "remove" },
+    { "header": "Sec-CH-UA-Model", "operation": "remove" },
+    { "header": "Sec-CH-UA-Arch", "operation": "remove" },
+    { "header": "Sec-CH-UA-Bitness", "operation": "remove" },
+    { "header": "Sec-CH-UA-WoW64", "operation": "remove" }
+  ]
+}
