@@ -33,7 +33,7 @@ In November 2025, Duke Energy migrated their API authentication to use Auth0 whi
 
 This new extension is effectively the same as the original, but generic, designed for use across multiple authentication platforms, and will hopefully be available in chrome and firefox stores, pending approval. Future extension development will be focused on this one moving forward.
 
-1. Download the HA Oauth Assist extension for your browser from the [latest release](https://github.com/crash0verride11/ha-oauth-assist/releases/latest/) page, chromium for firefox
+1. Download the HA OAuth Assist extension for your browser from the [latest release](https://github.com/crash0verride11/ha-oauth-assist/releases/latest/) page, chromium for firefox
 2. Extract the zip file (or use source)
 3. Install the extension
   - Chrome:
@@ -53,7 +53,7 @@ This new extension is effectively the same as the original, but generic, designe
 Instructions are [available here](https://github.com/crash0verride11/ha-dukeenergy/blob/ha-dukeenergy-aio/resources/legacy-extension.md), though I will no longer be actively maintaining it.
 
 ### Safari Extension
->Safari support using the built-in xcode conversion method. Requires a free developer account. I intend to eventually publish a Safari Version of HA Oauth Assist to replace this integration specific extension.
+>Safari support using the built-in xcode conversion method. Requires a free developer account. I intend to eventually publish a Safari Version of HA OAuth Assist to replace this integration specific extension.
 
 1. Download the latest safari extension from the release page [here](https://github.com/crash0verride11/ha-dukeenergy/releases/latest/download/safari-extension.zip).
 2. Open the project

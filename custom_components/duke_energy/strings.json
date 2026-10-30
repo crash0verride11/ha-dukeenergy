@@ -29,7 +29,7 @@
         "title": "Sign in to Duke Energy",
         "description": "Choose how to sign in.",
         "menu_options": {
-          "auth": "Browser extension (Duke Energy OAuth Helper)",
+          "auth": "Browser extension (HA OAuth Assist)",
           "auth_manual": "Guided manual sign-in"
         }
       },
@@ -45,7 +45,7 @@
       },
       "auth": {
         "title": "Sign in with the browser extension",
-        "description": "A new tab opens the Duke Energy sign-in. With the Duke Energy OAuth Helper extension installed, proceed with sign in and follow the instructions in 'Link to Home Assistant' to finish setup automatically.\nKeep this window open."
+        "description": "A new tab opens the Duke Energy sign-in. With the HA OAuth Assist extension (or a legacy Duke Energy extension) installed, proceed with sign in and follow the instructions in 'Link to Home Assistant' to finish setup automatically.\nKeep this window open."
       },
       "pick_implementation": {
         "title": "[%key:common::config_flow::title::oauth2_pick_implementation%]"
