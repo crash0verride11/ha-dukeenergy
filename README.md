@@ -38,7 +38,6 @@ This new extension is effectively the same as the original, but generic, designe
     - Click "Load unpacked" and select the extracted folder
   - Firefox:
     - Open the extension/ folder
-    - Replace its manifest.json with manifest.firefox.json
     - Go to about:debugging → Load Temporary Add-on
 4. In a new tab, click the extension's icon to open it's popup
 5. Select `Manage providers...`
