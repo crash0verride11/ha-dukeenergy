@@ -41,12 +41,12 @@ This new extension is effectively the same as the original, but generic, designe
     - Go to about:debugging → Load Temporary Add-on
 4. In a new tab, click the extension's icon to open it's popup
 5. Select `Manage providers...`
-6. Download and import the (duke_ha-oauth-assist.json)[https://github.com/crash0verride11/ha-dukeenergy/blob/ha-dukeenergy-aio/resources/duke_ha-oauth-assist.json] provider profile
+6. Download and import the [duke_ha-oauth-assist.json](https://github.com/crash0verride11/ha-dukeenergy/blob/ha-dukeenergy-aio/resources/duke_ha-oauth-assist.json) provider profile
 7. Enable the Duke provider profile
 8. Start the authentication process in Home Assistant
 
 ### Legacy Chrome Extension
-Instructions are (available here)[https://github.com/crash0verride11/ha-dukeenergy/blob/ha-dukeenergy-aio/resources/legacy-extension.md], though I will no longer be actively maintaining it.
+Instructions are [available here](https://github.com/crash0verride11/ha-dukeenergy/blob/ha-dukeenergy-aio/resources/legacy-extension.md), though I will no longer be actively maintaining it.
 
 ### Safari Extension
 >Safari support using the built-in xcode conversion method. Requires a free developer account. I intend to eventually publish a Safari Version of HA Oauth Assist to replace this integration specific extension.
