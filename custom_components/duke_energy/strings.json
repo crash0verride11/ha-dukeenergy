@@ -35,7 +35,7 @@
       },
       "auth_manual": {
         "title": "Sign in to Duke Energy",
-        "description": "Duke Energy expects a mobile app and blocks desktop browsers, so the browser you sign in with must identify as an iPhone.\n\n1. [Open the Duke Energy sign-in]({authorize_url}).\n2. For chromium desktop browsers, set the User-Agent to the iPhone value below and reload. Chrome or Edge: DevTools → ⋮ → More tools → Network conditions.\n3. Sign in. Duke then redirects to a `login.duke-energy.com/ios/...` address; the page itself may be blank or show an error.\n4. Copy the entire address from the address bar and paste it below.\n\nOn an iPhone or iPad, skip step 2. After signing in, long-press the address at the top of the sign-in window and select 'Copy'.\n\niPhone User-Agent:\n`{user_agent}`",
+        "description": "Duke Energy expects a mobile app and blocks desktop browsers, so the browser you sign in with must identify as an iPhone.\n\n1. [Open the Duke Energy sign-in]({authorize_url}).\n2. On a desktop browser, switch that tab to an iPhone User-Agent and reload.\n   - Chrome or Edge: View → Developer → Developer Tools → ⋮ → Device Emulation → pick an iPhone preset.\n   - Safari: Develop → User Agent → pick an iPhone entry. If there is no Develop menu, turn on 'Show features for web developers' in Safari Settings → Advanced.\n3. Sign in. Duke then redirects to a `login.duke-energy.com/ios/...` address; the page itself may be blank or show an error.\n4. Copy the entire address from the address bar and paste it below.\n\nOn an iPhone or iPad, skip step 2. After signing in, long-press the address at the top of the sign-in window and select 'Copy'.",
         "data": {
           "callback_url": "Callback URL"
         },

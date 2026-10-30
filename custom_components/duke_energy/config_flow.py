@@ -32,7 +32,7 @@ from homeassistant.helpers.selector import (
 )
 from yarl import URL
 
-from .const import DOMAIN, IOS_USER_AGENT
+from .const import DOMAIN
 from .coordinator import _SUPPORTED_METER_TYPES, DukeEnergyConfigEntry
 from .oauth import DukeEnergyOAuth2Implementation
 
@@ -152,10 +152,7 @@ class DukeEnergyOAuth2FlowHandler(
         return self.async_show_form(
             step_id="auth_manual",
             data_schema=STEP_AUTH_MANUAL_SCHEMA,
-            description_placeholders={
-                "authorize_url": self._authorize_url,
-                "user_agent": IOS_USER_AGENT,
-            },
+            description_placeholders={"authorize_url": self._authorize_url},
             errors=errors,
         )
 

@@ -19,7 +19,6 @@ from homeassistant.data_entry_flow import FlowResultType
 from custom_components.duke_energy.config_flow import DukeEnergyOAuth2FlowHandler  # noqa: F401
 from custom_components.duke_energy.const import (
     DOMAIN,
-    IOS_USER_AGENT,
     MOBILE_REDIRECT_URI,
 )
 from pytest_homeassistant_custom_component.common import MockConfigEntry
@@ -270,7 +269,6 @@ async def test_manual_paste_creates_entry(
         result = await _start_manual(hass)
         assert result["type"] is FlowResultType.FORM
         assert result["step_id"] == "auth_manual"
-        assert result["description_placeholders"]["user_agent"] == IOS_USER_AGENT
         authorize_url = result["description_placeholders"]["authorize_url"]
 
         result = await hass.config_entries.flow.async_configure(
