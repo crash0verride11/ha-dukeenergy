@@ -23,6 +23,10 @@ In November 2025, Duke Energy migrated their API authentication to use Auth0 whi
 > [!IMPORTANT]
 > A browser extension is recommended for easy authentication with Duke Energy, but a manual option is now available, instructions below.
 
+### Add the Integration
+
+[![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=crash0verride11&repository=ha-dukeenergy&category=integration)
+
 ### HA OAuth Assist (chrome and firefox extensions)
 
 > The extension is tied to the folder location on your computer and may 'disappear' if you move the folder.
@@ -59,9 +63,6 @@ Instructions are [available here](https://github.com/crash0verride11/ha-dukeener
 6. Build the extension again.
 7. Enable access to all or specific URL in the extension settings.
 8. Try to authenticate.
-
-[![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=crash0verride11&repository=ha-dukeenergy&category=integration)
-
 
 ### Manual Authentication
 > On non-iOS devices, manually configuring the browser's user agent is required.
