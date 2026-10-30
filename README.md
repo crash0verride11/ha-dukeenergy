@@ -23,20 +23,34 @@ In November 2025, Duke Energy migrated their API authentication to use Auth0 whi
 > [!IMPORTANT]
 > A browser extension is recommended for easy authentication with Duke Energy, but a manual option is now available, instructions below.
 
-### Chrome Extension
-> The chrome extension is tied to the folder location on your computer.
+### HA OAuth Assist (chrome and firefox extensions)
 
-1. Download the latest chrome extension from the aiodukeenergy release page [here](https://github.com/crash0verride11/ha-dukeenergy/releases/latest/download/chrome-extension.zip).
-2. Extract the folder from zip if downloaded.
-3. In Google Chrome, visit [chrome://extensions/](chrome://extensions/). In Edge, visit [edge://extensions/](edge://extensions/).
-4. Enable `Developer mode` in the top right.
-5. Click `Load unpacked` and select the extracted extension.
-6. Add [this repository](https://my.home-assistant.io/redirect/hacs_repository/?owner=crash0verride11&repository=ha-dukeenergy&category=integration) to HACS and install.
-7. Restart Home Assistant
-8. If you already had the core integration installed, it should prompt you to re-authenticate. Otherwise, add the integration from Devices and Services.
+> The extension is tied to the folder location on your computer and may 'disappear' if you move the folder.
+
+This new extension is effectively the same as the original, but generic, designed for use across multiple authentication platforms, and will hopefully be available in chrome and firefox stores, pending approval. Future extension development will be focused on this one moving forward.
+
+1. Download the HA Oauth Assist extension for your browser from the [latest release](https://github.com/crash0verride11/ha-oauth-assist/releases/latest/) page, chromium for firefox
+2. Extract the zip file (or use source)
+3. Install the extension
+  - Chrome:
+    - Open Google Chrome and navigate to `chrome://extensions/` or Edge `edge://extensions/`
+    - Enable "Developer mode"
+    - Click "Load unpacked" and select the extracted folder
+  - Firefox:
+    - Open the extension/ folder
+    - Replace its manifest.json with manifest.firefox.json
+    - Go to about:debugging → Load Temporary Add-on
+4. In a new tab, click the extension's icon to open it's popup
+5. Select `Manage providers...`
+6. Download and import the (duke_ha-oauth-assist.json)[https://github.com/crash0verride11/ha-dukeenergy/blob/ha-dukeenergy-aio/resources/duke_ha-oauth-assist.json] provider profile
+7. Enable the Duke provider profile
+8. Start the authentication process in Home Assistant
+
+### Legacy Chrome Extension
+Instructions are (available here)[https://github.com/crash0verride11/ha-dukeenergy/blob/ha-dukeenergy-aio/resources/legacy-extension.md], though I will no longer be actively maintaining it.
 
 ### Safari Extension
->Safari support using the built-in xcode conversion method. Requires a free developer account.
+>Safari support using the built-in xcode conversion method. Requires a free developer account. I intend to eventually publish a Safari Version of HA Oauth Assist to replace this integration specific extension.
 
 1. Download the latest safari extension from the release page [here](https://github.com/crash0verride11/ha-dukeenergy/releases/latest/download/safari-extension.zip).
 2. Open the project
