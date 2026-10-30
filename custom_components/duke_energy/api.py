@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import logging
+from http import HTTPStatus
 from typing import TYPE_CHECKING
 
-from aiodukeenergy_co import AbstractDukeEnergyAuth
+from aiodukeenergy_co import AbstractDukeEnergyAuth, DukeEnergyAuthError
+from aiohttp import ClientResponseError
 
 if TYPE_CHECKING:
     import aiohttp
@@ -32,5 +34,23 @@ class DukeEnergyAuth(AbstractDukeEnergyAuth):
 
     async def async_get_id_token(self) -> str:
         """Return a valid ID token."""
-        await self._oauth_session.async_ensure_token_valid()
+        # async_setup_entry makes the same distinction for the initial refresh.
+        # Here it covers refreshes during polling, where only a
+        # DukeEnergyAuthError reaches the coordinator as a reauth trigger; a
+        # busy endpoint (408/429) or an outage propagates as a failed poll.
+        try:
+            await self._oauth_session.async_ensure_token_valid()
+        except ClientResponseError as err:
+            if (
+                HTTPStatus.BAD_REQUEST <= err.status < HTTPStatus.INTERNAL_SERVER_ERROR
+                and err.status
+                not in (HTTPStatus.REQUEST_TIMEOUT, HTTPStatus.TOO_MANY_REQUESTS)
+            ):
+                msg = "OAuth refresh was rejected"
+                raise DukeEnergyAuthError(msg) from err
+            raise
+        except ValueError as err:
+            # oauth.py:_adjust_token_expiry — id_token missing or undecodable.
+            msg = "OAuth refresh returned an unusable ID token"
+            raise DukeEnergyAuthError(msg) from err
         return self._oauth_session.token["id_token"]

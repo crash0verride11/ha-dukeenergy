@@ -49,13 +49,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: DukeEnergyConfigEntry) -
 
     # Only a rejected refresh (4xx) or an unusable id_token is an auth
     # failure; a network or Auth0 outage should retry setup, not prompt reauth.
+    # 408 and 429 are 4xx but describe a busy endpoint, not a bad token.
     try:
         await session.async_ensure_token_valid()
     except ClientResponseError as err:
-        if HTTPStatus.BAD_REQUEST <= err.status < HTTPStatus.INTERNAL_SERVER_ERROR:
+        if (
+            HTTPStatus.BAD_REQUEST <= err.status < HTTPStatus.INTERNAL_SERVER_ERROR
+            and err.status
+            not in (HTTPStatus.REQUEST_TIMEOUT, HTTPStatus.TOO_MANY_REQUESTS)
+        ):
             raise ConfigEntryAuthFailed from err
         raise ConfigEntryNotReady from err
-    except ClientError as err:
+    except (ClientError, TimeoutError) as err:
         raise ConfigEntryNotReady from err
     except ValueError as err:
         # oauth.py:_adjust_token_expiry — id_token missing or undecodable.
@@ -89,15 +94,23 @@ async def async_unload_entry(hass: HomeAssistant, entry: DukeEnergyConfigEntry) 
     return await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
 
 
-async def async_remove_entry(
-    hass: HomeAssistant, _entry: DukeEnergyConfigEntry
-) -> None:
+async def async_remove_entry(hass: HomeAssistant, entry: DukeEnergyConfigEntry) -> None:
     """
-    Clear this integration's external statistics when it is removed.
+    Clear external statistics when the last Duke Energy entry is removed.
 
     Statistics persist across reloads and restarts (see the coordinator's
-    _on_unload); they are only removed here, when the user deletes the entry.
+    _on_unload); they are only removed here, when the user deletes the last
+    remaining entry.
     """
+    # Statistic IDs are keyed by meter serial and account, with nothing that
+    # records which entry wrote them, so a second login's history cannot be
+    # told apart from this one's. Keep it until the final entry is removed.
+    if any(
+        other.entry_id != entry.entry_id
+        for other in hass.config_entries.async_entries(DOMAIN)
+    ):
+        return
+
     instance = get_instance(hass)
     all_stats = await instance.async_add_executor_job(list_statistic_ids, hass)
     stat_ids = [
