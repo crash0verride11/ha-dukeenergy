@@ -6,6 +6,7 @@ import pytest
 
 from unittest.mock import AsyncMock, Mock, patch
 
+from aiodukeenergy_co import DukeEnergyAuthError
 from aiohttp import ClientConnectorError, ClientResponseError
 from homeassistant.config_entries import ConfigEntryState
 from homeassistant.core import HomeAssistant
@@ -14,9 +15,12 @@ from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
 from homeassistant.helpers.config_entry_oauth2_flow import OAuth2Session
 
 from custom_components.duke_energy import async_setup_entry
+from custom_components.duke_energy.api import DukeEnergyAuth
 from custom_components.duke_energy.const import DOMAIN
 from custom_components.duke_energy.coordinator import DukeEnergyCoordinator
 from pytest_homeassistant_custom_component.common import MockConfigEntry
+
+from .conftest import _make_id_token
 
 
 async def test_setup_entry(
@@ -136,6 +140,58 @@ async def test_setup_entry_token_refresh_outage_not_ready(
         await async_setup_entry(hass, mock_config_entry)
 
 
+@pytest.mark.parametrize(
+    "status",
+    [408, 429],
+    ids=["request_timeout", "too_many_requests"],
+)
+async def test_setup_entry_token_refresh_busy_not_ready(
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+    status: int,
+) -> None:
+    """A busy Auth0 endpoint retries setup even though 408/429 are 4xx."""
+    mock_config_entry.add_to_hass(hass)
+
+    with (
+        patch(
+            "homeassistant.helpers.config_entry_oauth2_flow.async_get_config_entry_implementation",
+            return_value=AsyncMock(),
+        ),
+        patch(
+            "homeassistant.helpers.config_entry_oauth2_flow.OAuth2Session.async_ensure_token_valid",
+            side_effect=ClientResponseError(Mock(), (), status=status),
+        ),
+        pytest.raises(ConfigEntryNotReady),
+    ):
+        await async_setup_entry(hass, mock_config_entry)
+
+
+@pytest.mark.parametrize(
+    ("refresh_error", "expected"),
+    [
+        (ClientResponseError(Mock(), (), status=401), DukeEnergyAuthError),
+        (ValueError("no id_token"), DukeEnergyAuthError),
+        (ClientResponseError(Mock(), (), status=429), ClientResponseError),
+        (ClientResponseError(Mock(), (), status=503), ClientResponseError),
+    ],
+    ids=["rejected", "unusable_id_token", "too_many_requests", "auth0_5xx"],
+)
+async def test_get_id_token_only_flags_rejected_refresh(
+    refresh_error: Exception,
+    expected: type[Exception],
+) -> None:
+    """Only a genuinely rejected refresh becomes the error that starts reauth."""
+    oauth_session = Mock()
+    oauth_session.token = {"id_token": _make_id_token()}
+    oauth_session.async_ensure_token_valid = AsyncMock(side_effect=refresh_error)
+
+    auth = DukeEnergyAuth(Mock(), oauth_session)
+
+    with pytest.raises(expected):
+        await auth.async_get_id_token()
+
+
 async def test_unload_entry_keeps_statistics(
     hass: HomeAssistant,
     mock_config_entry: MockConfigEntry,
@@ -198,3 +254,39 @@ async def test_remove_entry_clears_statistics(
         "duke_energy:electric_123_energy_consumption",
         "duke_energy:electric_123_energy_cost",
     }
+
+
+async def test_remove_entry_keeps_statistics_while_another_login_remains(
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+) -> None:
+    """Removing one of two logins must not clear the shared statistics."""
+    from custom_components.duke_energy import async_remove_entry
+
+    mock_config_entry.add_to_hass(hass)
+    second_entry = MockConfigEntry(
+        domain=DOMAIN,
+        unique_id="other-user-id",
+        title="other@example.com",
+        version=2,
+        minor_version=1,
+        data=dict(mock_config_entry.data),
+    )
+    second_entry.add_to_hass(hass)
+
+    recorder_instance = Mock()
+    recorder_instance.async_clear_statistics = Mock()
+
+    with (
+        patch(
+            "custom_components.duke_energy.get_instance",
+            return_value=recorder_instance,
+        ),
+        patch("custom_components.duke_energy.list_statistic_ids") as mock_list,
+    ):
+        await async_remove_entry(hass, mock_config_entry)
+
+    # Statistic IDs carry no entry ownership, so the other login's history
+    # would be collateral damage; the recorder is not consulted at all.
+    mock_list.assert_not_called()
+    recorder_instance.async_clear_statistics.assert_not_called()

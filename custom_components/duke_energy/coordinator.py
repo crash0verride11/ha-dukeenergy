@@ -7,10 +7,12 @@ from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, tzinfo
+from http import HTTPStatus
+from math import isfinite
 from typing import Any, cast
 
 from aiodukeenergy_co import DukeEnergy, DukeEnergyAuthError, DukeEnergyBlockedError
-from aiohttp import ClientError
+from aiohttp import ClientError, ClientResponseError
 from homeassistant.components.recorder import (
     get_instance,  # pyright: ignore[reportPrivateImportUsage]
 )
@@ -54,6 +56,8 @@ from .const import (
 _LOGGER = logging.getLogger(__name__)
 
 _SUPPORTED_METER_TYPES = ("ELECTRIC", "GAS")
+
+_HISTORY_RETRY_MSG = "Duke Energy history request failed; retry on the next poll"
 
 # Duke Energy data is typically available by 8am ET.
 # Check at 9am, 2pm, and 7pm ET, each shifted by a per-user per-day random
@@ -215,6 +219,16 @@ class DukeEnergyCoordinator(DataUpdateCoordinator[None]):
             self._unsub_scheduled()
             self._unsub_scheduled = None
 
+    async def async_shutdown(self) -> None:
+        """
+        Cancel the custom poll timer along with the native coordinator.
+
+        Shutdown does not unload the config entry, so _on_unload does not run
+        and the scheduled callback would otherwise survive to fire a refresh.
+        """
+        await super().async_shutdown()
+        self._on_unload()
+
     def _get_or_create_daily_offset(self, day: date) -> timedelta:
         """
         Return a stable deterministic offset for the given day.
@@ -238,6 +252,11 @@ class DukeEnergyCoordinator(DataUpdateCoordinator[None]):
 
         Applies a per-user per-day offset of up to ±2 hours.
         """
+        # A refresh already in flight when shutdown began still reaches its
+        # finally block; without this it would re-arm the timer we just killed.
+        if self._shutdown_requested:
+            return
+
         if self._unsub_scheduled is not None:
             self._unsub_scheduled()
             self._unsub_scheduled = None
@@ -342,7 +361,7 @@ class DukeEnergyCoordinator(DataUpdateCoordinator[None]):
                     1,
                     consumption_statistic_id,
                     True,  # noqa: FBT003
-                    set(),
+                    {"sum"},
                 )
                 if not last_stat:
                     _LOGGER.debug("Updating statistic for the first time")
@@ -367,11 +386,19 @@ class DukeEnergyCoordinator(DataUpdateCoordinator[None]):
                         None,
                         {"sum"},
                     )
+                    # The period query starts at the oldest returned read, so
+                    # it comes back empty when Duke no longer serves anything
+                    # that overlaps stored history. Resume from the last
+                    # recorded row instead of restarting the sum at zero.
+                    baseline = (
+                        stats.get(consumption_statistic_id)
+                        or last_stat[consumption_statistic_id]
+                    )[0]
                     consumption_sum = cast(
                         "float",
-                        stats[consumption_statistic_id][0]["sum"],  # pyright: ignore[reportTypedDictNotRequiredAccess]
+                        baseline["sum"],  # pyright: ignore[reportTypedDictNotRequiredAccess]
                     )
-                    last_stats_time = stats[consumption_statistic_id][0]["start"]  # pyright: ignore[reportTypedDictNotRequiredAccess]
+                    last_stats_time = baseline["start"]  # pyright: ignore[reportTypedDictNotRequiredAccess]
 
                 has_yesterday_data = any(k.date() == yesterday for k in usage)
                 yesterday_data_count += int(has_yesterday_data)
@@ -1019,9 +1046,12 @@ class DukeEnergyCoordinator(DataUpdateCoordinator[None]):
         if state is None or state.state in (STATE_UNKNOWN, STATE_UNAVAILABLE, ""):
             return None
         try:
-            return float(state.state)
+            price = float(state.state)
         except (ValueError, TypeError):
             return None
+        # "inf" and "nan" parse cleanly but would poison every cost stat
+        # derived from them.
+        return price if isfinite(price) else None
 
     async def _async_get_price_map(
         self,
@@ -1148,9 +1178,22 @@ class DukeEnergyCoordinator(DataUpdateCoordinator[None]):
                 # Make sure we don't go back too far
                 if end_step < start:
                     break
-            except (TimeoutError, ClientError):
-                # ClientError is raised when there is no more data for the range
-                break
+            except ClientResponseError as err:
+                if (
+                    HTTPStatus.BAD_REQUEST
+                    <= err.status
+                    < HTTPStatus.INTERNAL_SERVER_ERROR
+                    and err.status
+                    not in (HTTPStatus.REQUEST_TIMEOUT, HTTPStatus.TOO_MANY_REQUESTS)
+                ):
+                    # A rejected range is how the API reports that no more
+                    # data exists: the walk backwards is done.
+                    break
+                raise UpdateFailed(_HISTORY_RETRY_MSG) from err
+            except (TimeoutError, ClientError) as err:
+                # An outage says nothing about where history ends. Failing the
+                # poll keeps a partial import from being recorded as complete.
+                raise UpdateFailed(_HISTORY_RETRY_MSG) from err
 
         _LOGGER.debug("Got %s meter usage reads", len(usage))
         return usage, run_interval
