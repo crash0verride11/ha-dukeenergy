@@ -627,6 +627,11 @@ class DukeEnergyCoordinator(DataUpdateCoordinator[None]):
                 )
             cycles = result["data"]
             cycle_start = date.fromisoformat(cycles[-1]["endDate"]) + timedelta(days=1)
+            # On rollover day the new cycle has no usage yet (it would start
+            # after `end`, which the summary rejects), so keep the cycle that
+            # just ended as current until then, as the app does.
+            if cycle_start > end.date():
+                cycle_start = date.fromisoformat(cycles[-1]["startDate"])
         except (
             TimeoutError,
             ClientError,

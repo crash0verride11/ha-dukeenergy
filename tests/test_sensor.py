@@ -286,6 +286,27 @@ async def test_billing_cycle_failure_without_cache(
     assert hass.states.get(cost_id).state == "185.5"
 
 
+async def test_billing_cycle_rollover_day_keeps_ended_cycle(
+    recorder_mock: object,
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+    mock_api_with_meters: AsyncMock,
+    stats_store: StatsStore,
+    auto_enable_custom_integrations: None,
+    freezer: FrozenDateTimeFactory,
+) -> None:
+    """The day after a cycle ends, that cycle's start is still sent."""
+    # The last cycle ended 2026-06-26 (yesterday), so endDate + 1 would be
+    # today — after the summary's endDate. The ended cycle stays current.
+    freezer.move_to("2026-06-27T12:00:00-04:00")
+    mock_config_entry.add_to_hass(hass)
+    await _setup_entry(hass, mock_config_entry)
+
+    assert mock_api_with_meters.get_monthly_usage.await_args.kwargs[
+        "start_date"
+    ] == datetime(2026, 5, 28)
+
+
 async def test_billing_cycle_cached_start_reused(
     recorder_mock: object,
     hass: HomeAssistant,
