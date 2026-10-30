@@ -174,7 +174,7 @@ class DukeEnergyCoordinator(DataUpdateCoordinator[None]):
             update_interval=None,  # Scheduling is handled by _schedule_next_check.
         )
         self.api = api
-        self._statistic_ids: set = set()
+        self._statistic_ids: set[str] = set()
         self._last_successful_date: date | None = None
         # Sensor sources (see sensor.py):
         # when the last poll attempt ran (success or not), when each meter
@@ -205,6 +205,11 @@ class DukeEnergyCoordinator(DataUpdateCoordinator[None]):
         self._offset_date: date | None = None
 
         self.config_entry.async_on_unload(self._on_unload)
+
+    @property
+    def statistic_ids(self) -> set[str]:
+        """Return the external statistic IDs this entry has written."""
+        return set(self._statistic_ids)
 
     def _on_unload(self) -> None:
         """
