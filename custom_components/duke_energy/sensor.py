@@ -10,8 +10,8 @@ One account device per Duke Energy account, holding:
 - ``cost_last_bill_cycle`` / ``cost_last_year``: the account-wide bill
   amounts from the monthly usage summary.
 
-One meter device per supported meter (linked to its account via_device),
-holding:
+One meter device per supported meter (linked to its account as its
+``via_device``), holding:
 
 - ``last_meter_change`` ("Last changed"): when new consumption statistics
   were last written.
@@ -32,6 +32,7 @@ from homeassistant.components.sensor import (
     SensorEntityDescription,
 )
 from homeassistant.const import UnitOfEnergy, UnitOfVolume
+from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
@@ -158,7 +159,7 @@ BILLING_SENSORS: tuple[DukeEnergyBillingSensorDescription, ...] = (
 
 
 async def async_setup_entry(
-    _hass: HomeAssistant,
+    hass: HomeAssistant,
     entry: DukeEnergyConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
@@ -167,16 +168,30 @@ async def async_setup_entry(
 
     Meters are enumerated once from the coordinator's first refresh (which
     completed before this platform was forwarded). Meters added later at
-    Duke Energy appear after a reload of the config entry. Account entities
-    are appended before their meters' so the account device exists when a
-    meter device references it via_device.
+    Duke Energy appear after a reload of the config entry.
+
+    Devices are registered here, before the entities are created, so the
+    account device's registry id is known when its meter devices are linked
+    to it via ``via_device_id`` (``DeviceInfo["via_device"]`` is deprecated
+    and removed in Home Assistant 2027.8). The entities' ``DeviceInfo`` then
+    only carries identifiers, attaching them to these devices.
     """
     coordinator = entry.runtime_data
+    device_registry = dr.async_get(hass)
     entities: list[SensorEntity] = []
-    accounts_seen: set[str] = set()
+    account_device_ids: dict[str, str] = {}
     for serial_number, info in coordinator.meter_info.items():
-        if info.src_acct_id not in accounts_seen:
-            accounts_seen.add(info.src_acct_id)
+        if info.src_acct_id not in account_device_ids:
+            account_number = coordinator.account_info.get(
+                info.src_acct_id, info.src_acct_id
+            )
+            account_device = device_registry.async_get_or_create(
+                config_entry_id=entry.entry_id,
+                identifiers={(DOMAIN, f"account_{info.src_acct_id}")},
+                name=f"Duke Energy Account {account_number}",
+                manufacturer="Duke Energy",
+            )
+            account_device_ids[info.src_acct_id] = account_device.id
             entities.append(
                 DukeEnergyStatusSensor(coordinator, entry, info.src_acct_id)
             )
@@ -198,9 +213,22 @@ async def async_setup_entry(
                 )
                 for description in BILLING_SENSORS
             )
-        entities.append(
-            DukeEnergyLastChangeSensor(coordinator, entry, serial_number, info)
+        service = info.service_type.capitalize()
+        meter_device = device_registry.async_get_or_create(
+            config_entry_id=entry.entry_id,
+            identifiers={(DOMAIN, serial_number)},
+            name=f"Duke Energy {service} {serial_number}",
+            manufacturer="Duke Energy",
+            model=f"{service} meter",
+            serial_number=serial_number,
         )
+        # Set via async_update_device rather than async_get_or_create so this
+        # also works on Home Assistant releases before 2026.8, where
+        # async_get_or_create only accepted the deprecated via_device.
+        device_registry.async_update_device(
+            meter_device.id, via_device_id=account_device_ids[info.src_acct_id]
+        )
+        entities.append(DukeEnergyLastChangeSensor(coordinator, entry, serial_number))
         entities.extend(
             DukeEnergyMeterUsageSensor(
                 coordinator, entry, serial_number, info, description
@@ -220,22 +248,13 @@ class DukeEnergyMeterEntity(CoordinatorEntity["DukeEnergyCoordinator"], SensorEn
         coordinator: DukeEnergyCoordinator,
         entry: DukeEnergyConfigEntry,
         serial_number: str,
-        info: MeterInfo,
         key: str,
     ) -> None:
         """Initialize the sensor and its meter device."""
         super().__init__(coordinator)
         self._serial_number = serial_number
         self._attr_unique_id = f"{entry.entry_id}_{serial_number}_{key}"
-        service = info.service_type.capitalize()
-        self._attr_device_info = DeviceInfo(
-            identifiers={(DOMAIN, serial_number)},
-            name=f"Duke Energy {service} {serial_number}",
-            manufacturer="Duke Energy",
-            model=f"{service} meter",
-            serial_number=serial_number,
-            via_device=(DOMAIN, f"account_{info.src_acct_id}"),
-        )
+        self._attr_device_info = DeviceInfo(identifiers={(DOMAIN, serial_number)})
 
 
 class DukeEnergyAccountEntity(CoordinatorEntity["DukeEnergyCoordinator"], SensorEntity):
@@ -254,11 +273,8 @@ class DukeEnergyAccountEntity(CoordinatorEntity["DukeEnergyCoordinator"], Sensor
         super().__init__(coordinator)
         self._src_acct_id = src_acct_id
         self._attr_unique_id = f"{entry.entry_id}_account_{src_acct_id}_{key}"
-        account_number = coordinator.account_info.get(src_acct_id, src_acct_id)
         self._attr_device_info = DeviceInfo(
-            identifiers={(DOMAIN, f"account_{src_acct_id}")},
-            name=f"Duke Energy Account {account_number}",
-            manufacturer="Duke Energy",
+            identifiers={(DOMAIN, f"account_{src_acct_id}")}
         )
 
 
@@ -366,10 +382,9 @@ class DukeEnergyLastChangeSensor(DukeEnergyMeterEntity, RestoreSensor):
         coordinator: DukeEnergyCoordinator,
         entry: DukeEnergyConfigEntry,
         serial_number: str,
-        info: MeterInfo,
     ) -> None:
         """Initialize with no restored value yet."""
-        super().__init__(coordinator, entry, serial_number, info, "last_meter_change")
+        super().__init__(coordinator, entry, serial_number, "last_meter_change")
         self._restored_value: datetime | None = None
 
     @property
@@ -409,7 +424,7 @@ class DukeEnergyMeterUsageSensor(DukeEnergyMeterEntity):
     ) -> None:
         """Initialize with the meter's service-type unit."""
         self.entity_description = description
-        super().__init__(coordinator, entry, serial_number, info, description.key)
+        super().__init__(coordinator, entry, serial_number, description.key)
         if info.service_type == "GAS":
             self._attr_device_class = SensorDeviceClass.GAS
             self._attr_native_unit_of_measurement = UnitOfVolume.CENTUM_CUBIC_FEET
