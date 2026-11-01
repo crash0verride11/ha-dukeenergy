@@ -11,6 +11,7 @@ This is a fork of [hunterjm](https://github.com/hunterjm/ha-dukeenergy)'s work w
 - Account and meter entities:
   - Account entities: When the integration last polled (`Last updated`), `Cost last bill cycle`, `Cost this time last year`
   - Meter entities: When each meter last received new data (`Last changed`), `Usage last bill cycle`, `Usage this bill cycle`,  `Usage this time last year`
+- Background first usage history retrieval
 
 ### AI Transparency
 Within the last year I've more heavily used AI to work on this integration. I'm a code-savvy, python-literate amateur who knows enough to spot when Claude is being a complete idiot, writing some convoluted insanity, or just making bad judgment calls. I review the code committed, excluding tests, where I only guide it to keep them practical instead of exhaustive. I try to add a human touch to the release notes for changes or features I considered, investigated, tested, captured traffic for, and spent time on. I let AI write some of the more tedious fix notes and backports from other forks, making sure appropriate credit is added. AI is not where I started, but I wouldn't have had the time to get past adding gas support without it.
