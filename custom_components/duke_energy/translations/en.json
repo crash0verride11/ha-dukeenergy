@@ -17,7 +17,7 @@
             "wrong_account": "You must reauthenticate with the same Duke Energy account"
         },
         "create_entry": {
-            "default": "Successfully authenticated"
+            "default": "Successfully authenticated with Duke Energy. Up to three years of usage history is now downloading in the background. **Check its status on the account device page.**\n&nbsp;"
         },
         "error": {
             "authorize_rejected": "Duke Energy rejected the sign-in before issuing a code, meaning the login page still saw a desktop browser. Set the iPhone User-Agent from step 2, then try the sign-in link again.",

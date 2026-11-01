@@ -69,11 +69,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: DukeEnergyConfigEntry) -
     auth = DukeEnergyAuth(aiohttp_client.async_get_clientsession(hass), session)
     client = DukeEnergy(auth)
 
+    # Only meter discovery blocks setup: the first refresh can be a 3-year
+    # backfill, so it runs in the background (cancelled on unload) and the
+    # Status sensor reports its progress.
     coordinator = DukeEnergyCoordinator(hass, client, entry)
-    await coordinator.async_config_entry_first_refresh()
+    await coordinator.async_discover_meters()
     entry.runtime_data = coordinator
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+
+    entry.async_create_background_task(
+        hass, coordinator.async_refresh(), name="duke_energy_first_refresh"
+    )
 
     return True
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timedelta
 from unittest.mock import DEFAULT, AsyncMock, Mock
 
@@ -22,8 +23,17 @@ from .conftest import StatsStore
 
 
 async def _setup_entry(hass: HomeAssistant, entry: MockConfigEntry) -> None:
-    """Set the entry up through the config entries manager."""
+    """Set the entry up and let its background first refresh finish."""
     assert await hass.config_entries.async_setup(entry.entry_id)
+    # Only the first refresh: other background tasks (the recorder wait) may
+    # be held open on purpose, so wait_background_tasks would hang.
+    await asyncio.gather(
+        *(
+            task
+            for task in entry._background_tasks
+            if task.get_name() == "duke_energy_first_refresh"
+        )
+    )
     await hass.async_block_till_done()
 
 
@@ -542,6 +552,26 @@ async def test_status_sensor_lifecycle(
         await coordinator.async_refresh()
         await hass.async_block_till_done()
         assert hass.states.get(status_id).state == "failed"
+
+
+async def test_failed_first_backfill_shows_failed_status(
+    recorder_mock: object,
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+    mock_api_with_meters: AsyncMock,
+    stats_store: StatsStore,
+    auto_enable_custom_integrations: None,
+) -> None:
+    """Setup survives a failed first backfill, and Status reports it."""
+    mock_api_with_meters.get_energy_usage.side_effect = TimeoutError
+    mock_config_entry.add_to_hass(hass)
+    await _setup_entry(hass, mock_config_entry)
+
+    status_id = _account_eid(hass, mock_config_entry, "src-1", "status")
+    next_poll_id = _account_eid(hass, mock_config_entry, "src-1", "next_duke_poll")
+    assert hass.states.get(status_id).state == "failed"
+    # The retry waits for the next poll window, which the account shows.
+    assert hass.states.get(next_poll_id).state not in (STATE_UNKNOWN, "unavailable")
 
 
 async def test_unload_entry(

@@ -49,17 +49,25 @@ async def test_setup_entry(
             return_value=None,
         ),
         patch(
-            "custom_components.duke_energy.coordinator.DukeEnergyCoordinator.async_config_entry_first_refresh",
+            "custom_components.duke_energy.coordinator.DukeEnergyCoordinator.async_discover_meters",
             new_callable=AsyncMock,
-        ),
+        ) as mock_discover,
+        patch(
+            "custom_components.duke_energy.coordinator.DukeEnergyCoordinator.async_refresh",
+            new_callable=AsyncMock,
+        ) as mock_refresh,
     ):
         # Forwarding the sensor platform requires the setup lock, which the
         # config entries manager holds during a real setup.
         async with mock_config_entry.setup_lock:
             result = await async_setup_entry(hass, mock_config_entry)
-        await hass.async_block_till_done()
+        await hass.async_block_till_done(wait_background_tasks=True)
 
     assert result is True
+
+    # Setup blocks only on discovery; the first refresh runs in the background.
+    mock_discover.assert_awaited_once()
+    mock_refresh.assert_awaited_once()
 
     # DukeEnergyAuth receives the aiohttp ClientSession and an OAuth2Session
     mock_auth_cls.assert_called_once()
