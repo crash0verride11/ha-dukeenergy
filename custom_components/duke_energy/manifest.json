@@ -1,6 +1,7 @@
 {
   "domain": "duke_energy",
   "name": "Duke Energy",
+  "categories": ["energy.meters_monitoring"],
   "codeowners": ["@crash0verride11"],
   "config_flow": true,
   "dependencies": ["recorder"],
