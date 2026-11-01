@@ -166,9 +166,10 @@ async def async_setup_entry(
     """
     Set up the account and meter sensors.
 
-    Meters are enumerated once from the coordinator's first refresh (which
-    completed before this platform was forwarded). Meters added later at
-    Duke Energy appear after a reload of the config entry.
+    Meters are enumerated once from the coordinator's setup-time discovery;
+    the first refresh runs in the background after this platform is
+    forwarded, so values read unknown until it finishes. Meters added later
+    at Duke Energy appear after a reload of the config entry.
 
     Devices are registered here, before the entities are created, so the
     account device's registry id is known when its meter devices are linked

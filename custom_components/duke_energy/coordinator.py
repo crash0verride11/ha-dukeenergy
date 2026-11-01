@@ -36,7 +36,7 @@ from homeassistant.const import (
     UnitOfVolume,
 )
 from homeassistant.core import HomeAssistant, callback
-from homeassistant.exceptions import ConfigEntryAuthFailed
+from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
 from homeassistant.helpers.event import async_track_point_in_time
 from homeassistant.helpers.update_coordinator import (
     DataUpdateCoordinator,
@@ -234,6 +234,39 @@ class DukeEnergyCoordinator(DataUpdateCoordinator[None]):
         await super().async_shutdown()
         self._on_unload()
 
+    async def async_discover_meters(self) -> None:
+        """
+        Register the supported meters and their accounts for platform setup.
+
+        Runs during setup so the sensor platform can create its devices while
+        the first refresh runs in the background. The library caches the
+        meters, so that refresh's own get_meters() makes no extra request.
+        """
+        try:
+            with _translate_auth_errors():
+                meters: dict[str, dict[str, Any]] = await self.api.get_meters()
+        except (UpdateFailed, TimeoutError, ClientError) as err:
+            # A CDN block or an outage: let HA retry setup.
+            msg = "Could not fetch Duke Energy meters"
+            raise ConfigEntryNotReady(msg) from err
+
+        for serial_number, meter in meters.items():
+            self._register_meter(serial_number, meter)
+
+    def _register_meter(self, serial_number: str, meter: dict[str, Any]) -> bool:
+        """Record a supported meter and its account; False if unsupported."""
+        if (
+            not isinstance(meter["serviceType"], str)
+            or meter["serviceType"] not in _SUPPORTED_METER_TYPES
+        ):
+            _LOGGER.debug("Skipping unsupported meter type %s", meter["serviceType"])
+            return False
+
+        src_acct_id = meter["account"]["srcAcctId"]
+        self.meter_info[serial_number] = MeterInfo(meter["serviceType"], src_acct_id)
+        self.account_info[src_acct_id] = meter["account"]["accountNumber"]
+        return True
+
     def _get_or_create_daily_offset(self, day: date) -> timedelta:
         """
         Return a stable deterministic offset for the given day.
@@ -301,6 +334,12 @@ class DukeEnergyCoordinator(DataUpdateCoordinator[None]):
 
     async def _async_update_data(self) -> None:
         """Insert Duke Energy statistics."""
+        # A refresh requested mid-backfill (e.g. update_entity) must not start
+        # a second one; the running refresh reschedules in its finally.
+        if self.status == STATUS_FETCHING:
+            _LOGGER.debug("Duke Energy update already in progress; skipping")
+            return
+
         # The coordinator only notifies listeners when the refresh finishes,
         # so the fetching phase needs an explicit push; the exit phase set in
         # the finally rides that end-of-refresh notification.
@@ -331,20 +370,10 @@ class DukeEnergyCoordinator(DataUpdateCoordinator[None]):
                 meters: dict[str, dict[str, Any]] = await self.api.get_meters()
 
             for serial_number, meter in meters.items():
-                if (
-                    not isinstance(meter["serviceType"], str)
-                    or meter["serviceType"] not in _SUPPORTED_METER_TYPES
-                ):
-                    _LOGGER.debug(
-                        "Skipping unsupported meter type %s", meter["serviceType"]
-                    )
+                if not self._register_meter(serial_number, meter):
                     continue
 
                 src_acct_id = meter["account"]["srcAcctId"]
-                self.meter_info[serial_number] = MeterInfo(
-                    meter["serviceType"], src_acct_id
-                )
-                self.account_info[src_acct_id] = meter["account"]["accountNumber"]
                 # Before the statistics work: its early `continue`s must not
                 # skip the bill-cycle summary refresh.
                 await self._async_update_monthly_usage(

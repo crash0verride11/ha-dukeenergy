@@ -3,17 +3,18 @@
 import pytest
 
 from datetime import datetime, timedelta
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 from zoneinfo import ZoneInfo
 
 from freezegun.api import FrozenDateTimeFactory
 
 from aiodukeenergy_co import DukeEnergyAuthError, DukeEnergyBlockedError
+from aiohttp import ClientConnectorError
 from homeassistant.components.recorder.models import StatisticMeanType
 from homeassistant.config_entries import SOURCE_REAUTH, ConfigEntryState
 from homeassistant.const import UnitOfEnergy, UnitOfVolume
 from homeassistant.core import HomeAssistant
-from homeassistant.exceptions import ConfigEntryAuthFailed
+from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
 from homeassistant.helpers.update_coordinator import UpdateFailed
 from homeassistant.util.unit_conversion import EnergyConverter
 
@@ -22,8 +23,12 @@ from pytest_homeassistant_custom_component.common import (
     async_fire_time_changed,
 )
 
-from custom_components.duke_energy.const import DOMAIN, STATUS_FAILED
-from custom_components.duke_energy.coordinator import DukeEnergyCoordinator
+from custom_components.duke_energy.const import (
+    DOMAIN,
+    STATUS_FAILED,
+    STATUS_FETCHING,
+)
+from custom_components.duke_energy.coordinator import DukeEnergyCoordinator, MeterInfo
 
 from .conftest import StatsStore
 
@@ -169,6 +174,85 @@ async def test_auth_error_starts_reauth(
     assert hass.config_entries.flow.async_progress_by_handler(
         DOMAIN, match_context={"source": SOURCE_REAUTH}
     )
+
+
+async def test_discover_meters_registers_supported_meters(
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+    mock_api_with_meters: AsyncMock,
+) -> None:
+    """Discovery registers supported meters and accounts, skipping the rest."""
+    mock_config_entry.add_to_hass(hass)
+    mock_api_with_meters.get_meters.return_value["999"] = {
+        "serialNum": "999",
+        "serviceType": "WATER",
+        "account": {"accountNumber": "acct-2", "srcAcctId": "src-2"},
+    }
+    coordinator = DukeEnergyCoordinator(hass, mock_api_with_meters, mock_config_entry)
+
+    await coordinator.async_discover_meters()
+
+    assert coordinator.meter_info == {"123": MeterInfo("ELECTRIC", "src-1")}
+    assert coordinator.account_info == {"src-1": "acct-1"}
+    # Discovery only enumerates meters; the backfill is left to the refresh.
+    mock_api_with_meters.get_energy_usage.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        TimeoutError(),
+        ClientConnectorError(Mock(), OSError("dns")),
+        DukeEnergyBlockedError("403"),
+    ],
+    ids=["timeout", "network", "blocked"],
+)
+async def test_discover_meters_outage_not_ready(
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+    mock_api_with_meters: AsyncMock,
+    error: Exception,
+) -> None:
+    """An outage or CDN block during discovery retries setup."""
+    mock_config_entry.add_to_hass(hass)
+    mock_api_with_meters.get_meters.side_effect = error
+    coordinator = DukeEnergyCoordinator(hass, mock_api_with_meters, mock_config_entry)
+
+    with pytest.raises(ConfigEntryNotReady):
+        await coordinator.async_discover_meters()
+
+
+async def test_discover_meters_auth_error_starts_reauth(
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+    mock_api_with_meters: AsyncMock,
+) -> None:
+    """A rejected token during discovery is an auth failure, not a retry."""
+    mock_config_entry.add_to_hass(hass)
+    mock_api_with_meters.get_meters.side_effect = DukeEnergyAuthError("401")
+    coordinator = DukeEnergyCoordinator(hass, mock_api_with_meters, mock_config_entry)
+
+    with pytest.raises(ConfigEntryAuthFailed):
+        await coordinator.async_discover_meters()
+
+
+async def test_refresh_skipped_while_fetching(
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+    mock_api_with_meters: AsyncMock,
+) -> None:
+    """A refresh requested mid-backfill does not start a second fetch."""
+    mock_config_entry.add_to_hass(hass)
+    coordinator = DukeEnergyCoordinator(hass, mock_api_with_meters, mock_config_entry)
+    coordinator.status = STATUS_FETCHING
+
+    await coordinator.async_refresh()
+    await hass.async_block_till_done()
+
+    mock_api_with_meters.get_meters.assert_not_called()
+    assert coordinator.status == STATUS_FETCHING
+    # The running refresh owns rescheduling; the skipped one leaves it alone.
+    assert coordinator.next_poll_time is None
 
 
 async def test_gas_meter_update(
