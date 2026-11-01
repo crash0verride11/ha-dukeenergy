@@ -29,25 +29,20 @@ In November 2025, Duke Energy migrated their API authentication to use Auth0 whi
 
 ### HA OAuth Assist (chrome and firefox extensions)
 
-> The extension is tied to the folder location on your computer and may 'disappear' if you move the folder.
+This new extension is effectively the same as the original, but generic, designed for use across multiple authentication platforms. Future extension development will be focused on this one moving forward.
 
-This new extension is effectively the same as the original, but generic, designed for use across multiple authentication platforms, and will hopefully be available in chrome and firefox stores, pending approval. Future extension development will be focused on this one moving forward.
-
-1. Download the HA OAuth Assist extension for your browser from the [latest release](https://github.com/crash0verride11/ha-oauth-assist/releases/latest/) page, chromium for firefox
-2. Extract the zip file (or use source)
-3. Install the extension
-  - Chrome:
-    - Open Google Chrome and navigate to `chrome://extensions/` or Edge `edge://extensions/`
-    - Enable "Developer mode"
-    - Click "Load unpacked" and select the extracted folder
-  - Firefox:
-    - Open the extension/ folder
-    - Go to about:debugging → Load Temporary Add-on
-4. In a new tab, click the extension's icon to open it's popup
-5. Select `Manage providers...`
-6. Download and import the [duke_ha-oauth-assist.json](https://github.com/crash0verride11/ha-dukeenergy/blob/ha-dukeenergy-aio/resources/duke_ha-oauth-assist.json) provider profile
-7. Enable the Duke provider profile
-8. Start the authentication process in Home Assistant
+1. Install the extension
+  - Chrome / Edge / other Chromium browsers:
+    - Install [OAuth Assist for HA](https://chromewebstore.google.com/detail/oauth-assist-for-ha/mdoleppdlojmeeogmmocmjnkemecaofh) from the Chrome Web Store
+  - Firefox (store listing is under review; install manually until it's approved):
+    - Download the Firefox zip from the [latest release](https://github.com/crash0verride11/ha-oauth-assist/releases/latest/) page and extract it
+    - Go to about:debugging → Load Temporary Add-on and select a file in the extracted extension/ folder
+    > A manually loaded extension is tied to the folder location on your computer and may 'disappear' if you move the folder.
+2. In a new tab, click the extension's icon to open its popup
+3. Select `Manage providers...`
+4. Download and import the [duke_ha-oauth-assist.json](https://github.com/crash0verride11/ha-dukeenergy/blob/ha-dukeenergy-aio/resources/duke_ha-oauth-assist.json) provider profile
+5. Enable the Duke provider profile
+6. Start the authentication process in Home Assistant
 
 ### Legacy Chrome Extension
 Instructions are [available here](https://github.com/crash0verride11/ha-dukeenergy/blob/ha-dukeenergy-aio/resources/legacy-extension.md), though I will no longer be actively maintaining it.
