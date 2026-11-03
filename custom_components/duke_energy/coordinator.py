@@ -295,7 +295,7 @@ class DukeEnergyCoordinator(DataUpdateCoordinator[None]):
 
     def _schedule_next_check(self, tz: tzinfo, *, had_success: bool) -> None:
         """
-        Schedule the next data check near 7am, 2pm, or 7pm ET.
+        Schedule the next data check near 9am, 2pm, or 7pm ET.
 
         Applies a per-user per-day offset of up to ±2 hours.
         """
