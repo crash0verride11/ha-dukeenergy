@@ -447,6 +447,7 @@ def _entry_with_meters(hass: HomeAssistant, meters: dict) -> MockConfigEntry:
     coordinator = Mock()
     coordinator.meter_info = meters
     coordinator.async_rebuild_costs = AsyncMock()
+    coordinator.async_update_costs = AsyncMock()
     entry.runtime_data = coordinator
     return entry
 
@@ -538,6 +539,10 @@ async def test_options_flow_saves_static_mode(
     assert entry.options["cost_meters"] == {
         "123": {"mode": "static", "price": 0.1874}
     }
+    # Applied at once from stored usage, not at the next poll.
+    await hass.async_block_till_done()
+    entry.runtime_data.async_update_costs.assert_awaited_once()
+    entry.runtime_data.async_rebuild_costs.assert_not_called()
 
 
 async def test_options_flow_off_mode(
@@ -665,6 +670,7 @@ async def test_options_flow_backfill_rebuilds_costs(
 
     assert result["type"] is FlowResultType.CREATE_ENTRY
     rebuild.assert_awaited_once()
+    entry.runtime_data.async_update_costs.assert_not_called()
     mock_reload.assert_not_called()
     assert entry.options["backfill_cost"] is False
 

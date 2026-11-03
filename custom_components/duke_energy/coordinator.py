@@ -635,6 +635,15 @@ class DukeEnergyCoordinator(DataUpdateCoordinator[None]):
         """
         await self._async_update_costs(rebuild=True)
 
+    async def async_update_costs(self) -> None:
+        """
+        Price stored consumption that has no cost yet, as a poll would.
+
+        Run by the options flow after saving, so new cost settings apply at
+        once instead of at the next poll.
+        """
+        await self._async_update_costs()
+
     async def _async_update_costs(self, *, rebuild: bool = False) -> None:
         """
         Bring each cost-tracked meter's cost statistic up to date.

@@ -415,6 +415,13 @@ class DukeEnergyOptionsFlow(OptionsFlow):
                 self.config_entry, options=self._options()
             )
             if not user_input.get("backfill_cost", False):
+                # Apply the new settings now rather than at the next poll,
+                # which can be a day away. Needs only the recorder.
+                self.config_entry.async_create_background_task(
+                    self.hass,
+                    self.config_entry.runtime_data.async_update_costs(),
+                    name="duke_energy_cost_update",
+                )
                 return await self.async_step_finish()
             self._rebuild_task = self.hass.async_create_task(
                 self.config_entry.runtime_data.async_rebuild_costs(),
