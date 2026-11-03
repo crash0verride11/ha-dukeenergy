@@ -50,7 +50,8 @@ async def async_get_config_entry_diagnostics(
     # to read when the same meter carries the same label in both.
     options = dict(entry.options)
     cost_meters = options.get("cost_meters", {})
-    serials = set(cost_meters)
+    reenabled = options.get("cost_reenabled", [])
+    serials = set(cost_meters) | set(reenabled)
     if coordinator is not None:
         serials.update(coordinator.meter_info)
     meter_names = {
@@ -60,6 +61,8 @@ async def async_get_config_entry_diagnostics(
         options["cost_meters"] = {
             meter_names[serial]: config for serial, config in cost_meters.items()
         }
+    if "cost_reenabled" in options:
+        options["cost_reenabled"] = [meter_names[serial] for serial in reenabled]
 
     diagnostics: dict[str, Any] = {
         "entry": {

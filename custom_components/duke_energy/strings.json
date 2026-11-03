@@ -87,7 +87,7 @@
           "backfill_cost": "Backfill historical cost"
         },
         "data_description": {
-          "backfill_cost": "Enabling reloads the integration and reprices all past usage for every configured meter using the earliest available or static price. Leave off to price only new usage."
+          "backfill_cost": "Recalculate cost for all stored usage for enabled meters. Usage before the first known price uses the earliest available price. With a static price, all past usage is repriced at the current rate. Leave off to keep existing costs: new costs go back as far as a price sensor's history, or to the start of the current bill cycle (up to 30 days) at a static price."
         }
       }
     },
@@ -95,10 +95,14 @@
       "no_price_data": "The selected entity has no long-term statistics or a numeric current value.",
       "entity_required": "Select a price entity, or choose a different cost source.",
       "price_required": "Enter a static price, or choose a different cost source.",
-      "invalid_price": "The static price must be a positive number."
+      "invalid_price": "The static price must be a positive number.",
+      "cost_rebuild_failed": "Your cost settings were saved, but historical costs could not be rebuilt. Check that each price entity is available, then try again, or save without backfill."
     },
     "abort": {
       "no_meters": "No supported electric or gas meters were found for this account."
+    },
+    "progress": {
+      "rebuild_cost": "Rebuilding historical costs from stored usage. This may take a moment."
     }
   },
   "entity": {
