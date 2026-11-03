@@ -26,6 +26,7 @@ async def test_diagnostics_redacts_identifying_material(
             "cost_meters": {
                 "serial-1": {"mode": "sensor", "entity_id": "sensor.private_rate"}
             },
+            "cost_reenabled": ["serial-1"],
             "backfill_cost": False,
         },
     )
@@ -71,6 +72,7 @@ async def test_diagnostics_redacts_identifying_material(
         "mode": "sensor",
         "entity_id": "**REDACTED**",
     }
+    assert result["entry"]["options"]["cost_reenabled"] == ["meter_1"]
     # Relabelling is for the dump only; the stored options keep real serials.
     assert "serial-1" in mock_config_entry.options["cost_meters"]
 
@@ -83,7 +85,11 @@ async def test_diagnostics_without_coordinator(
     mock_config_entry.add_to_hass(hass)
     hass.config_entries.async_update_entry(
         mock_config_entry,
-        options={"cost_meters": {"serial-2": {"mode": "static", "price": 0.15}}},
+        options={
+            "cost_meters": {"serial-2": {"mode": "static", "price": 0.15}},
+            # A meter no longer on the account can linger here.
+            "cost_reenabled": ["serial-2", "serial-3"],
+        },
     )
     mock_config_entry.runtime_data = None
 
@@ -91,7 +97,10 @@ async def test_diagnostics_without_coordinator(
 
     assert result["coordinator"] is None
     assert result["entry"]["data"]["token"] == "**REDACTED**"
-    assert "serial-2" not in json.dumps(result)
+    dump = json.dumps(result)
+    assert "serial-2" not in dump
+    assert "serial-3" not in dump
+    assert result["entry"]["options"]["cost_reenabled"] == ["meter_1", "meter_2"]
     assert result["entry"]["options"]["cost_meters"] == {
         "meter_1": {"mode": "static", "price": 0.15}
     }

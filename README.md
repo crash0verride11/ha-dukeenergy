@@ -111,8 +111,10 @@ For external statistics, such as those the integration makes, home assistant onl
 - Select each meter you want to track and select a price source
 - Select `Save and apply`
 - Backfilling historical data
-    - Enabled will calculate a running cost for all available usage, based on either the price at the time and earlier price available, or the set static price
-    - Disabled will only use the newly set price for new usage running cost calculations
+    - Enabling recalculates cost for all stored usage of enabled meters, with a waiting screen, no reload needed. Usage before your price sensor's first recorded price gets the earliest price. A static price (or a `number`/`input_number`) reprices everything at the current rate, replacing any earlier rates
+    - Disabled keeps existing costs. New costs are filled in as far back as your price sensor's history goes, or from the start of the current bill cycle (up to 30 days) with a static price
+- Turning a meter's cost off keeps its history. Turning it back on fills the gap from a price sensor's history, or picks up at the current bill cycle with a static price
+- If your price sensor is unavailable for a while, costs catch up once it's back
 
 ## FAQ
 

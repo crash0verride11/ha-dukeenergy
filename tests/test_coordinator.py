@@ -2,7 +2,7 @@
 
 import pytest
 
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from unittest.mock import AsyncMock, Mock
 from zoneinfo import ZoneInfo
 
@@ -657,3 +657,400 @@ async def test_cost_mode_off_skips(
 
     assert coordinator.last_update_success is True
     assert "duke_energy:electric_123_energy_cost" not in stats_store.data
+
+
+async def test_cost_first_enable_limited_to_window(
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+    mock_api_with_meters: AsyncMock,
+    stats_store: StatsStore,
+) -> None:
+    """A meter's first costs reach back 30 days, not over all stored usage."""
+    mock_config_entry.add_to_hass(hass)
+    _set_cost_meters(
+        hass, mock_config_entry, {"123": {"mode": "static", "price": 0.10}}
+    )
+    reading_ts = next(iter(mock_api_with_meters.get_energy_usage.return_value["data"]))
+    old = reading_ts - timedelta(days=60)
+    recent = reading_ts - timedelta(days=10)
+    stats_store.seed(
+        "duke_energy:electric_123_energy_consumption",
+        [
+            {"start": old, "state": 5.0, "sum": 5.0},
+            {"start": recent, "state": 1.0, "sum": 6.0},
+        ],
+    )
+
+    coordinator = DukeEnergyCoordinator(hass, mock_api_with_meters, mock_config_entry)
+    await coordinator.async_refresh()
+    await hass.async_block_till_done()
+
+    assert coordinator.last_update_success is True
+    cost_rows = stats_store.data["duke_energy:electric_123_energy_cost"]
+    # The 60-day-old row is left for an explicit backfill.
+    assert [r["start"] for r in cost_rows] == [
+        recent.timestamp(),
+        reading_ts.timestamp(),
+    ]
+    assert [r["sum"] for r in cost_rows] == pytest.approx([0.10, 0.23])
+
+
+async def test_cost_catches_up_beyond_fetch_window(
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+    mock_api_with_meters: AsyncMock,
+    stats_store: StatsStore,
+) -> None:
+    """After an outage, usage past Duke's 30-day fetch window is still priced.
+
+    Without a re-enable from the options flow, a gap after the last cost row
+    is caught up in full, not cut back to the current bill cycle.
+    """
+    mock_config_entry.add_to_hass(hass)
+    _set_cost_meters(
+        hass, mock_config_entry, {"123": {"mode": "static", "price": 0.10}}
+    )
+    reading_ts = next(iter(mock_api_with_meters.get_energy_usage.return_value["data"]))
+    last_cost = reading_ts - timedelta(days=90)
+    unpriced = reading_ts - timedelta(days=60)
+    stats_store.seed(
+        "duke_energy:electric_123_energy_consumption",
+        [
+            {"start": last_cost, "state": 1.0, "sum": 1.0},
+            {"start": unpriced, "state": 2.0, "sum": 3.0},
+        ],
+    )
+    stats_store.seed(
+        "duke_energy:electric_123_energy_cost",
+        [{"start": last_cost, "state": 0.10, "sum": 0.10}],
+    )
+
+    coordinator = DukeEnergyCoordinator(hass, mock_api_with_meters, mock_config_entry)
+    await coordinator.async_refresh()
+    await hass.async_block_till_done()
+
+    assert coordinator.last_update_success is True
+    cost_rows = stats_store.data["duke_energy:electric_123_energy_cost"]
+    assert [r["start"] for r in cost_rows] == [
+        last_cost.timestamp(),
+        unpriced.timestamp(),
+        reading_ts.timestamp(),
+    ]
+    assert [r["sum"] for r in cost_rows] == pytest.approx([0.10, 0.30, 0.43])
+
+
+async def test_cost_priced_on_poll_that_skips_duke(
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+    mock_api_with_meters: AsyncMock,
+    stats_store: StatsStore,
+) -> None:
+    """Usage waiting on a price is priced by a later same-day poll."""
+    mock_config_entry.add_to_hass(hass)
+    _set_cost_entities(hass, mock_config_entry, {"123": "sensor.price"})
+    # No price yet: the first poll records consumption but no cost.
+    coordinator = DukeEnergyCoordinator(hass, mock_api_with_meters, mock_config_entry)
+    await coordinator.async_refresh()
+    await hass.async_block_till_done()
+    assert "duke_energy:electric_123_energy_cost" not in stats_store.data
+
+    hass.states.async_set("sensor.price", "0.20")
+    await coordinator.async_refresh()
+    await hass.async_block_till_done()
+
+    assert coordinator.last_update_success is True
+    # "Already retrieved today": no second Duke request.
+    assert mock_api_with_meters.get_meters.call_count == 1
+    cost_rows = stats_store.data["duke_energy:electric_123_energy_cost"]
+    assert [r["state"] for r in cost_rows] == pytest.approx([0.26])
+
+
+async def test_cost_rebuild_without_price_raises(
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+    mock_api_with_meters: AsyncMock,
+    stats_store: StatsStore,
+) -> None:
+    """An explicit rebuild with nothing to price with fails loudly."""
+    mock_config_entry.add_to_hass(hass)
+    _set_cost_entities(hass, mock_config_entry, {"123": "sensor.price"})
+    coordinator = DukeEnergyCoordinator(hass, mock_api_with_meters, mock_config_entry)
+    await coordinator.async_refresh()
+    await hass.async_block_till_done()
+
+    with pytest.raises(ValueError, match="sensor.price"):
+        await coordinator.async_rebuild_costs()
+
+
+async def test_cost_rebuild_reprices_stored_history(
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+    mock_api_with_meters: AsyncMock,
+    stats_store: StatsStore,
+) -> None:
+    """A rebuild replaces existing costs from stored consumption, no Duke call."""
+    mock_config_entry.add_to_hass(hass)
+    _set_cost_meters(
+        hass, mock_config_entry, {"123": {"mode": "static", "price": 0.10}}
+    )
+    coordinator = DukeEnergyCoordinator(hass, mock_api_with_meters, mock_config_entry)
+    await coordinator.async_refresh()
+    await hass.async_block_till_done()
+    calls = mock_api_with_meters.get_energy_usage.call_count
+
+    _set_cost_meters(
+        hass, mock_config_entry, {"123": {"mode": "static", "price": 0.30}}
+    )
+    await coordinator.async_rebuild_costs()
+
+    assert mock_api_with_meters.get_energy_usage.call_count == calls
+    cost_rows = stats_store.data["duke_energy:electric_123_energy_cost"]
+    assert [r["sum"] for r in cost_rows] == pytest.approx([0.39])  # 1.3 x 0.30
+
+
+async def test_cost_legacy_backfill_without_price_clears_flag(
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+    mock_api_with_meters: AsyncMock,
+    stats_store: StatsStore,
+) -> None:
+    """A saved backfill that cannot be priced is dropped, not retried forever."""
+    mock_config_entry.add_to_hass(hass)
+    _set_cost_entities(hass, mock_config_entry, {"123": "sensor.price"}, backfill=True)
+
+    coordinator = DukeEnergyCoordinator(hass, mock_api_with_meters, mock_config_entry)
+    await coordinator.async_refresh()
+    await hass.async_block_till_done()
+
+    assert coordinator.last_update_success is True
+    assert mock_config_entry.options["backfill_cost"] is False
+
+
+def _set_cycle_start(api: AsyncMock, cycle_start: date) -> None:
+    """Make Duke's billing-cycle graph report the current cycle's start."""
+    cycles = [
+        {
+            "endDate": (cycle_start - timedelta(days=1)).isoformat(),
+            "startDate": (cycle_start - timedelta(days=30)).isoformat(),
+        }
+    ]
+    default = api.get_energy_usage.side_effect
+
+    def _dispatch(serial: str, interval: str, *args: object, **kwargs: object):
+        if interval == "MONTHLY":
+            return {"data": cycles, "missing": []}
+        return default(serial, interval, *args, **kwargs)
+
+    api.get_energy_usage.side_effect = _dispatch
+
+
+def _cycle_rows(reading_ts: datetime) -> tuple[date, datetime, datetime]:
+    """Return a cycle start 11 days back plus a row before and inside it."""
+    et = ZoneInfo("America/New_York")
+    cycle_start = reading_ts.astimezone(et).date() - timedelta(days=10)
+    midnight = datetime.combine(cycle_start, datetime.min.time(), tzinfo=et)
+    return cycle_start, midnight - timedelta(days=2), midnight + timedelta(days=1)
+
+
+async def test_cost_first_enable_starts_at_bill_cycle(
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+    mock_api_with_meters: AsyncMock,
+    stats_store: StatsStore,
+) -> None:
+    """A meter's first costs start at the current bill cycle, inside 30 days."""
+    mock_config_entry.add_to_hass(hass)
+    _set_cost_meters(
+        hass, mock_config_entry, {"123": {"mode": "static", "price": 0.10}}
+    )
+    reading_ts = next(iter(mock_api_with_meters.get_energy_usage.return_value["data"]))
+    cycle_start, before, inside = _cycle_rows(reading_ts)
+    _set_cycle_start(mock_api_with_meters, cycle_start)
+    stats_store.seed(
+        "duke_energy:electric_123_energy_consumption",
+        [
+            {"start": before, "state": 5.0, "sum": 5.0},
+            {"start": inside, "state": 1.0, "sum": 6.0},
+        ],
+    )
+
+    coordinator = DukeEnergyCoordinator(hass, mock_api_with_meters, mock_config_entry)
+    await coordinator.async_refresh()
+    await hass.async_block_till_done()
+
+    assert coordinator.last_update_success is True
+    cost_rows = stats_store.data["duke_energy:electric_123_energy_cost"]
+    # The previous cycle's row is left for an explicit backfill.
+    assert [r["start"] for r in cost_rows] == [
+        inside.timestamp(),
+        reading_ts.timestamp(),
+    ]
+    assert [r["sum"] for r in cost_rows] == pytest.approx([0.10, 0.23])
+
+
+async def test_cost_reenabled_flat_rate_starts_at_bill_cycle(
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+    mock_api_with_meters: AsyncMock,
+    stats_store: StatsStore,
+) -> None:
+    """A static meter turned back on skips the gap; its sum carries on."""
+    mock_config_entry.add_to_hass(hass)
+    hass.config_entries.async_update_entry(
+        mock_config_entry,
+        options={
+            "cost_meters": {"123": {"mode": "static", "price": 0.10}},
+            "cost_reenabled": ["123"],
+        },
+    )
+    reading_ts = next(iter(mock_api_with_meters.get_energy_usage.return_value["data"]))
+    cycle_start, before, inside = _cycle_rows(reading_ts)
+    _set_cycle_start(mock_api_with_meters, cycle_start)
+    last_cost = reading_ts - timedelta(days=90)
+    stats_store.seed(
+        "duke_energy:electric_123_energy_consumption",
+        [
+            {"start": last_cost, "state": 1.0, "sum": 1.0},
+            {"start": before, "state": 5.0, "sum": 6.0},
+            {"start": inside, "state": 1.0, "sum": 7.0},
+        ],
+    )
+    stats_store.seed(
+        "duke_energy:electric_123_energy_cost",
+        [{"start": last_cost, "state": 0.10, "sum": 0.10}],
+    )
+
+    coordinator = DukeEnergyCoordinator(hass, mock_api_with_meters, mock_config_entry)
+    await coordinator.async_refresh()
+    await hass.async_block_till_done()
+
+    assert coordinator.last_update_success is True
+    cost_rows = stats_store.data["duke_energy:electric_123_energy_cost"]
+    assert [r["start"] for r in cost_rows] == [
+        last_cost.timestamp(),
+        inside.timestamp(),
+        reading_ts.timestamp(),
+    ]
+    assert [r["sum"] for r in cost_rows] == pytest.approx([0.10, 0.20, 0.33])
+    # Settled: later polls carry on from the new rows.
+    assert mock_config_entry.options["cost_reenabled"] == []
+
+
+async def test_cost_reenabled_price_history_fills_gap(
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+    mock_api_with_meters: AsyncMock,
+    stats_store: StatsStore,
+) -> None:
+    """A sensor meter turned back on prices the whole gap from its history."""
+    mock_config_entry.add_to_hass(hass)
+    hass.config_entries.async_update_entry(
+        mock_config_entry,
+        options={
+            "cost_meters": {"123": {"mode": "sensor", "entity_id": "sensor.price"}},
+            "cost_reenabled": ["123"],
+        },
+    )
+    reading_ts = next(iter(mock_api_with_meters.get_energy_usage.return_value["data"]))
+    cycle_start, before, _ = _cycle_rows(reading_ts)
+    _set_cycle_start(mock_api_with_meters, cycle_start)
+    last_cost = reading_ts - timedelta(days=90)
+    gap = reading_ts - timedelta(days=60)
+    stats_store.seed(
+        "duke_energy:electric_123_energy_consumption",
+        [
+            {"start": last_cost, "state": 1.0, "sum": 1.0},
+            {"start": gap, "state": 2.0, "sum": 3.0},
+            {"start": before, "state": 1.0, "sum": 4.0},
+        ],
+    )
+    stats_store.seed(
+        "duke_energy:electric_123_energy_cost",
+        [{"start": last_cost, "state": 0.10, "sum": 0.10}],
+    )
+    stats_store.seed(
+        "sensor.price",
+        [{"start": gap, "mean": 0.10}, {"start": before, "mean": 0.20}],
+    )
+
+    coordinator = DukeEnergyCoordinator(hass, mock_api_with_meters, mock_config_entry)
+    await coordinator.async_refresh()
+    await hass.async_block_till_done()
+
+    assert coordinator.last_update_success is True
+    cost_rows = stats_store.data["duke_energy:electric_123_energy_cost"]
+    # Gap and previous-cycle rows priced from history; no day limit.
+    assert [r["state"] for r in cost_rows] == pytest.approx([0.10, 0.20, 0.20, 0.26])
+    assert mock_config_entry.options["cost_reenabled"] == []
+
+
+async def test_cost_first_enable_price_history_fills_back(
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+    mock_api_with_meters: AsyncMock,
+    stats_store: StatsStore,
+) -> None:
+    """A new sensor meter is priced as far back as its price history reaches."""
+    mock_config_entry.add_to_hass(hass)
+    _set_cost_entities(hass, mock_config_entry, {"123": "sensor.price"})
+    reading_ts = next(iter(mock_api_with_meters.get_energy_usage.return_value["data"]))
+    cycle_start, _, _ = _cycle_rows(reading_ts)
+    _set_cycle_start(mock_api_with_meters, cycle_start)
+    unpriced = reading_ts - timedelta(days=300)
+    first_price = reading_ts - timedelta(days=200)
+    stats_store.seed(
+        "duke_energy:electric_123_energy_consumption",
+        [
+            {"start": unpriced, "state": 4.0, "sum": 4.0},
+            {"start": first_price, "state": 2.0, "sum": 6.0},
+        ],
+    )
+    stats_store.seed("sensor.price", [{"start": first_price, "mean": 0.10}])
+
+    coordinator = DukeEnergyCoordinator(hass, mock_api_with_meters, mock_config_entry)
+    await coordinator.async_refresh()
+    await hass.async_block_till_done()
+
+    assert coordinator.last_update_success is True
+    cost_rows = stats_store.data["duke_energy:electric_123_energy_cost"]
+    # Not limited by the bill cycle or 30 days; usage before the first known
+    # price waits for a backfill.
+    assert [r["start"] for r in cost_rows] == [
+        first_price.timestamp(),
+        reading_ts.timestamp(),
+    ]
+    assert [r["sum"] for r in cost_rows] == pytest.approx([0.20, 0.33])
+
+
+async def test_cost_first_enable_without_price_history_starts_at_bill_cycle(
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+    mock_api_with_meters: AsyncMock,
+    stats_store: StatsStore,
+) -> None:
+    """An entity with only a current value prices from the bill cycle on."""
+    mock_config_entry.add_to_hass(hass)
+    _set_cost_entities(hass, mock_config_entry, {"123": "input_number.price"})
+    hass.states.async_set("input_number.price", "0.10")
+    reading_ts = next(iter(mock_api_with_meters.get_energy_usage.return_value["data"]))
+    cycle_start, before, inside = _cycle_rows(reading_ts)
+    _set_cycle_start(mock_api_with_meters, cycle_start)
+    stats_store.seed(
+        "duke_energy:electric_123_energy_consumption",
+        [
+            {"start": reading_ts - timedelta(days=300), "state": 4.0, "sum": 4.0},
+            {"start": before, "state": 5.0, "sum": 9.0},
+            {"start": inside, "state": 1.0, "sum": 10.0},
+        ],
+    )
+
+    coordinator = DukeEnergyCoordinator(hass, mock_api_with_meters, mock_config_entry)
+    await coordinator.async_refresh()
+    await hass.async_block_till_done()
+
+    assert coordinator.last_update_success is True
+    cost_rows = stats_store.data["duke_energy:electric_123_energy_cost"]
+    assert [r["start"] for r in cost_rows] == [
+        inside.timestamp(),
+        reading_ts.timestamp(),
+    ]

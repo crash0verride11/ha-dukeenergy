@@ -37,6 +37,7 @@ from .coordinator import _SUPPORTED_METER_TYPES, DukeEnergyConfigEntry
 from .oauth import DukeEnergyOAuth2Implementation
 
 if TYPE_CHECKING:
+    import asyncio
     from collections.abc import Mapping
 
 _LOGGER = logging.getLogger(__name__)
@@ -239,6 +240,11 @@ _EXPECTED_UNIT = {"ELECTRIC": "$/kWh", "GAS": "$/CCF"}
 _SAVE = "save"
 
 
+def _is_tracked(cost_config: dict[str, Any]) -> bool:
+    """Return whether a meter's cost configuration records costs."""
+    return cost_config.get("mode") in ("sensor", "static")
+
+
 class DukeEnergyOptionsFlow(OptionsFlow):
     """
     Handle per-meter cost tracking options.
@@ -247,25 +253,29 @@ class DukeEnergyOptionsFlow(OptionsFlow):
     cost source is set to ``sensor`` (price from a sensor's statistics/state),
     ``static`` (a fixed rate), or ``off`` (no cost tracking). Choosing "Save"
     writes the per-meter configuration to ``cost_meters`` and, if requested,
-    backfills historical cost.
+    rebuilds historical cost from the stored consumption.
     """
 
     config_entry: DukeEnergyConfigEntry
-    _meters: dict[str, dict[str, Any]]
+    # Serial number -> service type ("ELECTRIC" / "GAS").
+    _meters: dict[str, str]
     _cost_meters: dict[str, dict[str, Any]]
     _current_serial: str
+    _rebuild_task: asyncio.Task[None] | None = None
+    _rebuild_failed = False
 
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
         """Show the meter menu and route to the chosen meter or to Save."""
         if not hasattr(self, "_meters"):
+            # Setup registers the meters before the entry loads, so this needs
+            # no Duke request.
             coordinator = self.config_entry.runtime_data
-            meters = await coordinator.api.get_meters()
             self._meters = {
-                serial: meter
-                for serial, meter in meters.items()
-                if meter.get("serviceType") in _SUPPORTED_METER_TYPES
+                serial: info.service_type
+                for serial, info in coordinator.meter_info.items()
+                if info.service_type in _SUPPORTED_METER_TYPES
             }
             if not self._meters:
                 return self.async_abort(reason="no_meters")
@@ -285,8 +295,10 @@ class DukeEnergyOptionsFlow(OptionsFlow):
             return await self.async_step_meter()
 
         options = [
-            SelectOptionDict(value=serial, label=self._meter_menu_label(serial, meter))
-            for serial, meter in self._meters.items()
+            SelectOptionDict(
+                value=serial, label=self._meter_menu_label(serial, service_type)
+            )
+            for serial, service_type in self._meters.items()
         ]
         options.append(SelectOptionDict(value=_SAVE, label="Save and apply"))
         schema = vol.Schema(
@@ -298,15 +310,15 @@ class DukeEnergyOptionsFlow(OptionsFlow):
         )
         return self.async_show_form(step_id="init", data_schema=schema)
 
-    def _meter_menu_label(self, serial: str, meter: dict[str, Any]) -> str:
+    def _meter_menu_label(self, serial: str, service_type: str) -> str:
         """Return a menu label summarizing a meter's current cost source."""
-        service = str(meter["serviceType"]).capitalize()
+        service = service_type.capitalize()
         config = self._cost_meters.get(serial, {})
         mode = config.get("mode", "off")
         if mode == "sensor":
             detail = config.get("entity_id", "?")
         elif mode == "static":
-            unit = _EXPECTED_UNIT.get(meter["serviceType"], "")
+            unit = _EXPECTED_UNIT.get(service_type, "")
             detail = f"{config.get('price')} {unit}".strip()
         else:
             detail = "Off"
@@ -317,8 +329,7 @@ class DukeEnergyOptionsFlow(OptionsFlow):
     ) -> ConfigFlowResult:
         """Set the cost source (sensor / static / off) for one meter."""
         serial = self._current_serial
-        meter = self._meters[serial]
-        service_type = str(meter["serviceType"])
+        service_type = self._meters[serial]
         errors: dict[str, str] = {}
 
         if user_input is not None:
@@ -396,26 +407,101 @@ class DukeEnergyOptionsFlow(OptionsFlow):
     ) -> ConfigFlowResult:
         """Persist the per-meter configuration and optionally backfill."""
         if user_input is not None:
-            backfill = user_input.get("backfill_cost", False)
-            # Only reload when backfill is requested; otherwise the coordinator
-            # picks up the new configuration at its next scheduled poll. A reload
-            # (not async_request_refresh) is required because a fresh coordinator
-            # resets _last_successful_date, bypassing the "already retrieved
-            # today" guard that would otherwise defer the backfill.
-            if backfill:
-                self.hass.config_entries.async_schedule_reload(
-                    self.config_entry.entry_id
+            # Save before any rebuild, so the settings it prices with are the
+            # ones later polls use, even if the dialog is closed mid-rebuild.
+            # No update listener is registered, so this does not reload; the
+            # coordinator picks the settings up at its next poll.
+            self.hass.config_entries.async_update_entry(
+                self.config_entry, options=self._options()
+            )
+            if not user_input.get("backfill_cost", False):
+                # Apply the new settings now rather than at the next poll,
+                # which can be a day away. Needs only the recorder.
+                self.config_entry.async_create_background_task(
+                    self.hass,
+                    self.config_entry.runtime_data.async_update_costs(),
+                    name="duke_energy_cost_update",
                 )
-            return self.async_create_entry(
-                data={"cost_meters": self._cost_meters, "backfill_cost": backfill}
+                return await self.async_step_finish()
+            self._rebuild_task = self.hass.async_create_task(
+                self.config_entry.runtime_data.async_rebuild_costs(),
+                name="duke_energy_cost_rebuild",
+            )
+            # Always show progress first, even if the task already finished:
+            # HA resubmits this step's input after a progress-done result, so
+            # going straight to done would start another rebuild. The flow
+            # manager advances to the rebuild step once the task is done.
+            return self.async_show_progress(
+                step_id="rebuild",
+                progress_action="rebuild_cost",
+                progress_task=self._rebuild_task,
             )
 
-        # Backfill always defaults to off: it is a one-shot action the coordinator
-        # resets after populating history, so it should never persist as enabled.
+        # Backfill always defaults to off: it is a one-shot action, so it
+        # should never persist as enabled.
         schema = vol.Schema(
             {vol.Optional("backfill_cost", default=False): BooleanSelector()}
         )
-        return self.async_show_form(step_id="save", data_schema=schema)
+        return self.async_show_form(
+            step_id="save",
+            data_schema=schema,
+            errors={"base": "cost_rebuild_failed"} if self._rebuild_failed else None,
+        )
+
+    async def async_step_rebuild(
+        self, _user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Show progress while stored consumption is repriced."""
+        task = self._rebuild_task
+        if task is None:
+            return await self.async_step_finish()
+        if not task.done():
+            return self.async_show_progress(
+                step_id="rebuild",
+                progress_action="rebuild_cost",
+                progress_task=task,
+            )
+        self._rebuild_task = None
+        try:
+            task.result()
+        except Exception:
+            # Report recorder and pricing failures in the dialog, which offers
+            # a retry from the save step.
+            _LOGGER.exception("Could not backfill Duke Energy costs")
+            self._rebuild_failed = True
+            return self.async_show_progress_done(next_step_id="save")
+        self._rebuild_failed = False
+        return self.async_show_progress_done(next_step_id="finish")
+
+    async def async_step_finish(
+        self, _user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Close the flow with the saved settings."""
+        return self.async_create_entry(data=self._options())
+
+    def _options(self) -> dict[str, Any]:
+        """
+        Return the entry options for the edited cost configuration.
+
+        Meters going from off to tracked are added to ``cost_reenabled`` so
+        the coordinator restarts a flat-rate meter's costs at the current bill
+        cycle instead of pricing the whole gap (see
+        DukeEnergyCoordinator._async_add_cost_statistics). Earlier entries the
+        coordinator has not yet settled are kept unless the meter is off again.
+        """
+        saved = self.config_entry.options
+        old_meters = saved.get("cost_meters", {})
+        reenabled = set(saved.get("cost_reenabled", []))
+        for serial, config in self._cost_meters.items():
+            if not _is_tracked(config):
+                reenabled.discard(serial)
+            elif not _is_tracked(old_meters.get(serial, {})):
+                reenabled.add(serial)
+        return {
+            "cost_meters": self._cost_meters,
+            "cost_reenabled": sorted(reenabled),
+            "backfill_cost": False,
+        }
 
     async def _entity_usable_for_price(self, entity_id: str) -> bool:
         """
