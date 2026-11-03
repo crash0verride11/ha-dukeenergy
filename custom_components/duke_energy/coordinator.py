@@ -341,7 +341,7 @@ class DukeEnergyCoordinator(DataUpdateCoordinator[None]):
             self.hass, _trigger_refresh, next_poll_time
         )
 
-    async def _async_update_data(self) -> None:
+    async def _async_update_data(self) -> None:  # noqa: PLR0912, PLR0915
         """Insert Duke Energy statistics."""
         # A refresh requested mid-backfill (e.g. update_entity) must not start
         # a second one; the running refresh reschedules in its finally.
