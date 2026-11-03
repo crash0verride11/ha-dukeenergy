@@ -457,9 +457,7 @@ _ELECTRIC_METER = {"123": MeterInfo("ELECTRIC", "src-1")}
 
 async def _menu_select(hass: HomeAssistant, flow_id: str, value: str) -> dict:
     """Pick an option from the meter menu (init step)."""
-    return await hass.config_entries.options.async_configure(
-        flow_id, {"meter": value}
-    )
+    return await hass.config_entries.options.async_configure(flow_id, {"meter": value})
 
 
 async def _configure_meter(hass: HomeAssistant, flow_id: str, user_input: dict) -> dict:
@@ -536,9 +534,7 @@ async def test_options_flow_saves_static_mode(
     result = await _save(hass, result["flow_id"])
 
     assert result["type"] is FlowResultType.CREATE_ENTRY
-    assert entry.options["cost_meters"] == {
-        "123": {"mode": "static", "price": 0.1874}
-    }
+    assert entry.options["cost_meters"] == {"123": {"mode": "static", "price": 0.1874}}
     # Applied at once from stored usage, not at the next poll.
     await hass.async_block_till_done()
     entry.runtime_data.async_update_costs.assert_awaited_once()

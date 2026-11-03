@@ -14,7 +14,7 @@ from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
 
 from homeassistant.helpers.config_entry_oauth2_flow import OAuth2Session
 
-from custom_components.duke_energy import async_setup_entry
+from custom_components.duke_energy import async_migrate_entry, async_setup_entry
 from custom_components.duke_energy.api import DukeEnergyAuth
 from custom_components.duke_energy.const import DOMAIN
 from custom_components.duke_energy.coordinator import DukeEnergyCoordinator
@@ -116,6 +116,47 @@ async def test_setup_entry_raises_on_token_validation_failure(
         pytest.raises(ConfigEntryAuthFailed),
     ):
         await async_setup_entry(hass, mock_config_entry)
+
+
+async def test_setup_entry_unusable_id_token_starts_reauth(
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+) -> None:
+    """A refreshed token without a usable id_token is an auth failure, not a retry."""
+    mock_config_entry.add_to_hass(hass)
+
+    with (
+        patch(
+            "homeassistant.helpers.config_entry_oauth2_flow.async_get_config_entry_implementation",
+            return_value=AsyncMock(),
+        ),
+        patch(
+            "homeassistant.helpers.config_entry_oauth2_flow.OAuth2Session.async_ensure_token_valid",
+            side_effect=ValueError("No id_token in token response"),
+        ),
+        pytest.raises(ConfigEntryAuthFailed),
+    ):
+        await async_setup_entry(hass, mock_config_entry)
+
+
+async def test_migrate_v1_entry_clears_data_for_reauth(
+    hass: HomeAssistant,
+) -> None:
+    """A version 1 entry is moved to version 2 with no token, so setup asks for reauth."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        version=1,
+        data={"username": "old@example.com", "password": "old-password"},
+    )
+    entry.add_to_hass(hass)
+
+    assert await async_migrate_entry(hass, entry) is True
+
+    assert entry.version == 2
+    assert entry.minor_version == 1
+    assert entry.data == {}
+    with pytest.raises(ConfigEntryAuthFailed):
+        await async_setup_entry(hass, entry)
 
 
 @pytest.mark.parametrize(
