@@ -86,6 +86,15 @@ _DUKE_TZ = "America/New_York"
 _BASE_TIMES_ET = (time(9, 0), time(14, 0), time(19, 0))
 _OFFSET_WINDOW = timedelta(hours=2)
 
+# 4xx statuses that say nothing about where Duke's history ends: a rejected
+# token, a CDN refusal, or a busy server. Any other 4xx ends the backward walk.
+_NOT_END_OF_HISTORY = (
+    HTTPStatus.UNAUTHORIZED,
+    HTTPStatus.FORBIDDEN,
+    HTTPStatus.REQUEST_TIMEOUT,
+    HTTPStatus.TOO_MANY_REQUESTS,
+)
+
 # A cached bill-cycle start older than this is likely from an already-closed
 # cycle (cycles run ~30 days); reusing it would window this-cycle usage
 # across two cycles.
@@ -760,6 +769,7 @@ class DukeEnergyCoordinator(DataUpdateCoordinator[None]):
         except (
             TimeoutError,
             ClientError,
+            UpdateFailed,
             IndexError,
             KeyError,
             TypeError,
@@ -817,7 +827,7 @@ class DukeEnergyCoordinator(DataUpdateCoordinator[None]):
                 summary = await self.api.get_monthly_usage(
                     serial_number, start_date=start_date
                 )
-        except (TimeoutError, ClientError) as err:
+        except (TimeoutError, ClientError, UpdateFailed) as err:
             _LOGGER.warning(
                 "Could not fetch the bill-cycle summary for meter %s: %s",
                 serial_number,
@@ -855,7 +865,7 @@ class DukeEnergyCoordinator(DataUpdateCoordinator[None]):
         try:
             with _translate_auth_errors():
                 info = await self.api.get_billing_payment_info(include_closed=True)
-        except (TimeoutError, ClientError) as err:
+        except (TimeoutError, ClientError, UpdateFailed) as err:
             _LOGGER.warning(
                 "Could not fetch billing and payment info: %s",
                 _describe_request_error(err),
@@ -1419,8 +1429,7 @@ class DukeEnergyCoordinator(DataUpdateCoordinator[None]):
                     HTTPStatus.BAD_REQUEST
                     <= err.status
                     < HTTPStatus.INTERNAL_SERVER_ERROR
-                    and err.status
-                    not in (HTTPStatus.REQUEST_TIMEOUT, HTTPStatus.TOO_MANY_REQUESTS)
+                    and err.status not in _NOT_END_OF_HISTORY
                 ):
                     # A rejected range is how the API reports that no more
                     # data exists: the walk backwards is done.

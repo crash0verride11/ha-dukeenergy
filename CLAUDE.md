@@ -61,7 +61,7 @@ Configured per meter in the options flow (`config_flow.py:DukeEnergyOptionsFlow`
 External PyPI dependency (import name `aiodukeenergy_co`; dev source at `../aiodukeenergy`). Key modules:
 - `dukeenergy.py` — `DukeEnergy` API client: `get_accounts()`, `get_meters()`, `get_energy_usage()`, `get_monthly_usage()`, `get_billing_payment_info()`, `get_invoices()`. Accounts and meters are cached in-memory; pass `fresh=True` to bypass.
 - `duke_auth.py` — Abstract/concrete auth classes. The `AbstractDukeEnergyAuth.request()` method auto-injects the DE bearer token.
-- `exceptions.py` — `DukeEnergyAuthError` (rejected token → reauth) and `DukeEnergyBlockedError` (CDN/WAF refusal before reaching Duke's API → failed poll, retried at the next slot, no reauth). The coordinator maps them in `_translate_auth_errors`.
+- `exceptions.py` — `DukeEnergyAuthError` (rejected token → reauth) and `DukeEnergyBlockedError` (CDN/WAF refusal before reaching Duke's API → failed poll, retried at the next slot, no reauth; on the optional bill-cycle and billing calls it is only logged and the previous values kept). The coordinator maps them in `_translate_auth_errors`.
 - `auth0.py` — Standalone Auth0 PKCE client for non-HA contexts.
 
 ### Statistic details
@@ -115,5 +115,5 @@ Key mocking notes:
 
 - All service areas are `America/New_York`. If Duke Energy ever expands, timezone detection by service address would be needed.
 - Duke Energy hourly data is available up to ~3 years back; `_async_get_energy_usage` fetches in 30-day windows walking backward.
-- During pagination, a 4xx response (other than 408/429) is treated as "no more data" (normal termination). A 5xx, 408, 429, timeout or network error fails the poll with `UpdateFailed`, and nothing is written for that meter, so a partial backfill is never recorded as complete.
+- During pagination, a 4xx response (other than 401/403/408/429) is treated as "no more data" (normal termination). A 401, 403, 408, 429, 5xx, timeout or network error fails the poll with `UpdateFailed`, and nothing is written for that meter, so a partial backfill is never recorded as complete. A 401/403 here does not start reauth: the Duke API token is re-exchanged once it expires, and a 403 may be a CDN refusal.
 - Config entry version is 2. `async_migrate_entry` moves version 1 entries to version 2 with their data cleared, so setup finds no token and starts reauth.

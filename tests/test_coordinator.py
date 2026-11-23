@@ -188,6 +188,69 @@ async def test_blocked_request_fails_poll_without_reauth(
     )
 
 
+def _fail_optional_request(mock_api: AsyncMock, request: str, error: Exception) -> None:
+    """Make one of the optional bill-cycle and billing requests raise."""
+    if request != "bill_cycle":
+        getattr(mock_api, request).side_effect = error
+        return
+    dispatch = mock_api.get_energy_usage.side_effect
+
+    def _dispatch(serial: str, interval: str, *args: object, **kwargs: object):
+        if interval == "MONTHLY":
+            raise error
+        return dispatch(serial, interval, *args, **kwargs)
+
+    mock_api.get_energy_usage.side_effect = _dispatch
+
+
+_OPTIONAL_REQUESTS = ["bill_cycle", "get_monthly_usage", "get_billing_payment_info"]
+
+
+@pytest.mark.parametrize("request_name", _OPTIONAL_REQUESTS)
+async def test_blocked_optional_request_keeps_poll_working(
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+    mock_api_with_meters: AsyncMock,
+    stats_store: StatsStore,
+    request_name: str,
+) -> None:
+    """A blocked bill-cycle or billing request still records usage and costs."""
+    mock_config_entry.add_to_hass(hass)
+    _set_cost_meters(
+        hass, mock_config_entry, {"123": {"mode": "static", "price": 0.12}}
+    )
+    _fail_optional_request(
+        mock_api_with_meters, request_name, DukeEnergyBlockedError("403")
+    )
+    coordinator = DukeEnergyCoordinator(hass, mock_api_with_meters, mock_config_entry)
+
+    await coordinator.async_refresh()
+    await hass.async_block_till_done()
+
+    assert coordinator.last_update_success is True
+    assert _CONSUMPTION_ID in stats_store.data
+    assert "duke_energy:electric_123_energy_cost" in stats_store.data
+
+
+@pytest.mark.parametrize("request_name", _OPTIONAL_REQUESTS)
+async def test_rejected_token_on_optional_request_fails_poll(
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+    mock_api_with_meters: AsyncMock,
+    stats_store: StatsStore,
+    request_name: str,
+) -> None:
+    """A rejected token is an auth failure even on an optional request."""
+    mock_config_entry.add_to_hass(hass)
+    _fail_optional_request(
+        mock_api_with_meters, request_name, DukeEnergyAuthError("401")
+    )
+    coordinator = DukeEnergyCoordinator(hass, mock_api_with_meters, mock_config_entry)
+
+    with pytest.raises(ConfigEntryAuthFailed):
+        await coordinator._async_update_data()
+
+
 async def test_auth_error_starts_reauth(
     recorder_mock: object,
     hass: HomeAssistant,
@@ -677,13 +740,15 @@ async def test_history_rejected_range_ends_backfill(
 @pytest.mark.parametrize(
     ("error", "cause"),
     [
+        (ClientResponseError(Mock(), (), status=401), "(HTTP 401)"),
+        (ClientResponseError(Mock(), (), status=403), "(HTTP 403)"),
         (ClientResponseError(Mock(), (), status=503), "(HTTP 503)"),
         (ClientResponseError(Mock(), (), status=429), "(HTTP 429)"),
         (ClientResponseError(Mock(), (), status=408), "(HTTP 408)"),
         (TimeoutError(), "(timed out)"),
         (ClientConnectorError(Mock(), OSError("dns")), "(ClientConnectorError: "),
     ],
-    ids=["5xx", "429", "408", "timeout", "network"],
+    ids=["401", "403", "5xx", "429", "408", "timeout", "network"],
 )
 async def test_history_outage_fails_poll_without_partial_import(
     hass: HomeAssistant,
