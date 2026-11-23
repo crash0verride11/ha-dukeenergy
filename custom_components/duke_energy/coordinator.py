@@ -58,7 +58,21 @@ _LOGGER = logging.getLogger(__name__)
 
 _SUPPORTED_METER_TYPES = ("ELECTRIC", "GAS")
 
-_HISTORY_RETRY_MSG = "Duke Energy history request failed; retry on the next poll"
+
+def _describe_request_error(err: BaseException) -> str:
+    """
+    Name the cause of a failed request for a log line.
+
+    The coordinator logs only an UpdateFailed's message, not its chained
+    cause, and a bare TimeoutError has no text at all.
+    """
+    if isinstance(err, ClientResponseError):
+        return f"HTTP {err.status}"
+    if isinstance(err, TimeoutError):
+        return "timed out"
+    text = str(err)
+    return f"{type(err).__name__}: {text}" if text else type(err).__name__
+
 
 # Duke Energy data is typically available by 8am ET.
 # Check at 9am, 2pm, and 7pm ET, each shifted by a per-user per-day random
@@ -807,7 +821,7 @@ class DukeEnergyCoordinator(DataUpdateCoordinator[None]):
             _LOGGER.warning(
                 "Could not fetch the bill-cycle summary for meter %s: %s",
                 serial_number,
-                err,
+                _describe_request_error(err),
             )
             return
 
@@ -842,7 +856,10 @@ class DukeEnergyCoordinator(DataUpdateCoordinator[None]):
             with _translate_auth_errors():
                 info = await self.api.get_billing_payment_info(include_closed=True)
         except (TimeoutError, ClientError) as err:
-            _LOGGER.warning("Could not fetch billing and payment info: %s", err)
+            _LOGGER.warning(
+                "Could not fetch billing and payment info: %s",
+                _describe_request_error(err),
+            )
             return
 
         self.billing_payment_info = info
@@ -1408,11 +1425,26 @@ class DukeEnergyCoordinator(DataUpdateCoordinator[None]):
                     # A rejected range is how the API reports that no more
                     # data exists: the walk backwards is done.
                     break
-                raise UpdateFailed(_HISTORY_RETRY_MSG) from err
+                raise UpdateFailed(
+                    self._history_retry_msg(meter, start_step, end_step, err)
+                ) from err
             except (TimeoutError, ClientError) as err:
                 # An outage says nothing about where history ends. Failing the
                 # poll keeps a partial import from being recorded as complete.
-                raise UpdateFailed(_HISTORY_RETRY_MSG) from err
+                raise UpdateFailed(
+                    self._history_retry_msg(meter, start_step, end_step, err)
+                ) from err
 
         _LOGGER.debug("Got %s meter usage reads", len(usage))
         return usage, run_interval
+
+    @staticmethod
+    def _history_retry_msg(
+        meter: dict[str, Any], start: datetime, end: datetime, err: BaseException
+    ) -> str:
+        """Describe a failed history request: which meter, window and cause."""
+        return (
+            f"Duke Energy {meter['serviceType'].lower()} history request for "
+            f"{start.date()} to {end.date()} failed ({_describe_request_error(err)}); "
+            "retry on the next poll"
+        )

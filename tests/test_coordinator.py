@@ -675,13 +675,13 @@ async def test_history_rejected_range_ends_backfill(
 
 
 @pytest.mark.parametrize(
-    "error",
+    ("error", "cause"),
     [
-        ClientResponseError(Mock(), (), status=503),
-        ClientResponseError(Mock(), (), status=429),
-        ClientResponseError(Mock(), (), status=408),
-        TimeoutError(),
-        ClientConnectorError(Mock(), OSError("dns")),
+        (ClientResponseError(Mock(), (), status=503), "(HTTP 503)"),
+        (ClientResponseError(Mock(), (), status=429), "(HTTP 429)"),
+        (ClientResponseError(Mock(), (), status=408), "(HTTP 408)"),
+        (TimeoutError(), "(timed out)"),
+        (ClientConnectorError(Mock(), OSError("dns")), "(ClientConnectorError: "),
     ],
     ids=["5xx", "429", "408", "timeout", "network"],
 )
@@ -692,6 +692,7 @@ async def test_history_outage_fails_poll_without_partial_import(
     stats_store: StatsStore,
     freezer: FrozenDateTimeFactory,
     error: Exception,
+    cause: str,
 ) -> None:
     """An outage mid-backfill fails the poll and writes nothing for the meter.
 
@@ -708,6 +709,9 @@ async def test_history_outage_fails_poll_without_partial_import(
 
     assert coordinator.last_update_success is False
     assert isinstance(coordinator.last_exception, UpdateFailed)
+    # The coordinator logs only this message, so it must carry the cause.
+    assert cause in str(coordinator.last_exception)
+    assert "electric history request" in str(coordinator.last_exception)
     assert coordinator.status == STATUS_FAILED
     assert _CONSUMPTION_ID not in stats_store.data
     # The failed poll still schedules a retry.
