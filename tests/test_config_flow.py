@@ -162,15 +162,13 @@ async def test_oauth_create_entry_title_without_usable_email(
     mock_setup_entry: AsyncMock,
     email: str,
 ) -> None:
-    """A claim that cannot be masked never reaches the title."""
-    id_token = _make_id_token(
-        {"internal_identifier": "0123456789abcdef", "email": email}
-    )
+    """A claim that cannot be masked never reaches the title, nor does the user ID."""
+    id_token = _make_id_token({"email": email})
 
     result = await _make_flow(hass).async_oauth_create_entry(_make_oauth_data(id_token))
 
     assert result["type"] is FlowResultType.CREATE_ENTRY
-    assert result["title"] == "01234567"
+    assert result["title"] == "Duke Energy"
 
 
 async def test_oauth_create_entry_aborts_on_missing_id_token(

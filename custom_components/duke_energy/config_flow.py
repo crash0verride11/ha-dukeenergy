@@ -253,8 +253,9 @@ class DukeEnergyOAuth2FlowHandler(
         self._abort_if_unique_id_configured()
 
         # HA core puts the entry title in its log messages, so mask the address.
+        # The user ID is the unique ID, which diagnostics redact: never use it.
         return self.async_create_entry(
-            title=mask_email(email) or user_id[:8], data=data
+            title=mask_email(email) or "Duke Energy", data=data
         )
 
 
