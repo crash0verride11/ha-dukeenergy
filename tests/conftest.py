@@ -77,9 +77,9 @@ def mock_config_entry() -> MockConfigEntry:
     return MockConfigEntry(
         domain=DOMAIN,
         unique_id="test-user-id",
-        title="test@example.com",
+        title="te•••@ex•••.com",
         version=2,
-        minor_version=1,
+        minor_version=2,
         data={
             "auth_implementation": DOMAIN,
             "token": {

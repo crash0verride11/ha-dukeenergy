@@ -58,6 +58,29 @@ STEP_AUTH_MANUAL_SCHEMA = vol.Schema(
 )
 
 
+# From this local-part length on, the mask also shows how the address ends.
+_SHOW_END_LENGTH = 9
+
+
+def mask_email(email: str) -> str:
+    """
+    Mask an email address, leaving enough to tell two accounts apart.
+
+    The local part shows its first 2 characters (none if it has only 1), and from
+    9 characters also its last 2, for plus-addresses. The dots are always the
+    same, so they do not reveal its length. The domain shows only its first 2
+    characters and its ending: a personal domain can identify its owner. Returns
+    "" for anything that is not an email address.
+    """
+    local, _, domain = email.strip().rpartition("@")
+    name, _, ending = domain.rpartition(".")
+    if not local or not name:
+        return ""
+    head = local[:2] if len(local) > 1 else ""
+    end = local[-2:] if len(local) >= _SHOW_END_LENGTH else ""
+    return f"{head}•••{end}@{name[:2]}•••.{ending}"
+
+
 class InvalidCallbackURLError(Exception):
     """Raised when the pasted callback URL cannot be used."""
 
@@ -88,7 +111,7 @@ class DukeEnergyOAuth2FlowHandler(
     """
 
     VERSION = 2
-    MINOR_VERSION = 1
+    MINOR_VERSION = 2
 
     DOMAIN = DOMAIN
 
@@ -229,7 +252,10 @@ class DukeEnergyOAuth2FlowHandler(
             )
         self._abort_if_unique_id_configured()
 
-        return self.async_create_entry(title=email or user_id, data=data)
+        # HA core puts the entry title in its log messages, so mask the address.
+        return self.async_create_entry(
+            title=mask_email(email) or user_id[:8], data=data
+        )
 
 
 # Expected price unit per meter service type, surfaced in the form so users
