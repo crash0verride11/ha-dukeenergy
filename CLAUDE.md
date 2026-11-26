@@ -98,7 +98,7 @@ uv run pytest tests/
 Or without a project venv (ephemeral):
 
 ```bash
-PYTHONPATH=. uvx --with "pytest-homeassistant-custom-component>=0.13.0" --with "freezegun>=1.5" --with "PyJWT>=2.8" --with "aiodukeenergy-co==1.3.4" pytest tests/
+PYTHONPATH=. uvx --with "pytest-homeassistant-custom-component>=0.13.0" --with "freezegun>=1.5" --with "PyJWT>=2.8" --with "aiodukeenergy-co==1.5.0" pytest tests/
 ```
 
 Key fixtures (`tests/conftest.py`):
@@ -116,4 +116,5 @@ Key mocking notes:
 - All service areas are `America/New_York`. If Duke Energy ever expands, timezone detection by service address would be needed.
 - Duke Energy hourly data is available up to ~3 years back; `_async_get_energy_usage` fetches in 30-day windows walking backward.
 - During pagination, a 4xx response (other than 401/403/408/429) is treated as "no more data" (normal termination). A 401, 403, 408, 429, 5xx, timeout or network error fails the poll with `UpdateFailed`, and nothing is written for that meter, so a partial backfill is never recorded as complete. A 401/403 here does not start reauth: the Duke API token is re-exchanged once it expires, and a 403 may be a CDN refusal.
-- Config entry version is 2. `async_migrate_entry` moves version 1 entries to version 2 with their data cleared, so setup finds no token and starts reauth.
+- Config entry version is 2, minor version 2. `async_migrate_entry` moves version 1 entries to version 2 with their data cleared, so setup finds no token and starts reauth.
+- The entry title is the account email masked by `config_flow.py:mask_email` ("Duke Energy" if there is no usable email), because HA core puts titles in its log messages. Minor version 2 masks titles that are a bare email and keeps any other title.

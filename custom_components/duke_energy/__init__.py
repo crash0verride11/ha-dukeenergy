@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from http import HTTPStatus
 from typing import TYPE_CHECKING
 
@@ -16,6 +17,7 @@ from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
 from homeassistant.helpers import aiohttp_client, config_entry_oauth2_flow
 
 from .api import DukeEnergyAuth
+from .config_flow import mask_email
 from .const import DOMAIN, PLATFORMS
 from .coordinator import DukeEnergyConfigEntry, DukeEnergyCoordinator
 from .oauth import DukeEnergyOAuth2Implementation
@@ -24,6 +26,10 @@ if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
 
 _LOGGER = logging.getLogger(__name__)
+
+# The title this integration set itself: the bare account email. A masked
+# address contains "•" and does not match.
+_EMAIL_TITLE = re.compile(r"[^\s()@•]+@[^\s()@•]+")
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: DukeEnergyConfigEntry) -> bool:
@@ -88,11 +94,22 @@ async def async_setup_entry(hass: HomeAssistant, entry: DukeEnergyConfigEntry) -
 async def async_migrate_entry(
     hass: HomeAssistant, entry: DukeEnergyConfigEntry
 ) -> bool:
-    """Cannot migrate without reauth."""
+    """Migrate an older config entry to the current version."""
     if entry.version == 1:
+        # Cannot migrate the sign-in: clearing the data makes setup start reauth.
         hass.config_entries.async_update_entry(
             entry, data={}, minor_version=1, version=2
         )
+
+    # A fresh `if`, so a version 1 entry is masked in the same pass.
+    if entry.version == 2 and entry.minor_version < 2:  # noqa: PLR2004
+        # minor_version 2: mask the account email in the entry title, which HA
+        # core repeats in its log messages. Titles the user changed are kept.
+        title = entry.title
+        if _EMAIL_TITLE.fullmatch(title) and (masked := mask_email(title)):
+            title = masked
+        hass.config_entries.async_update_entry(entry, title=title, minor_version=2)
+
     return True
 
 

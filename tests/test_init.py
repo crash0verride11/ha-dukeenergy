@@ -88,7 +88,7 @@ async def test_setup_entry_raises_on_missing_token(
     entry = MockConfigEntry(
         domain=DOMAIN,
         version=2,
-        minor_version=1,
+        minor_version=2,
         data={},  # no "token" key
     )
     entry.add_to_hass(hass)
@@ -145,6 +145,7 @@ async def test_migrate_v1_entry_clears_data_for_reauth(
     """A version 1 entry is moved to version 2 with no token, so setup asks for reauth."""
     entry = MockConfigEntry(
         domain=DOMAIN,
+        title="alexander@example.com",
         version=1,
         data={"username": "old@example.com", "password": "old-password"},
     )
@@ -153,10 +154,50 @@ async def test_migrate_v1_entry_clears_data_for_reauth(
     assert await async_migrate_entry(hass, entry) is True
 
     assert entry.version == 2
-    assert entry.minor_version == 1
+    assert entry.minor_version == 2
+    assert entry.title == "al•••er@ex•••.com"
     assert entry.data == {}
     with pytest.raises(ConfigEntryAuthFailed):
         await async_setup_entry(hass, entry)
+
+
+@pytest.mark.parametrize(
+    ("title", "expected"),
+    [
+        ("alexander@example.com", "al•••er@ex•••.com"),
+        # Not set by this integration, or already free of an address.
+        ("Home power", "Home power"),
+        ("Duke alexander@example.com", "Duke alexander@example.com"),
+        ("Duke (alexander@example.com)", "Duke (alexander@example.com)"),
+        ("test-user-id", "test-user-id"),
+        ("alexander@localhost", "alexander@localhost"),
+        ("al•••er@ex•••.com", "al•••er@ex•••.com"),
+        ("•••@ex•••.com", "•••@ex•••.com"),
+    ],
+)
+async def test_migrate_v2_1_entry_masks_email_title(
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+    title: str,
+    expected: str,
+) -> None:
+    """Minor version 2 masks the title this integration set and keeps any other."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        title=title,
+        version=2,
+        minor_version=1,
+        data=dict(mock_config_entry.data),
+        options={"cost_meters": {}},
+    )
+    entry.add_to_hass(hass)
+
+    assert await async_migrate_entry(hass, entry) is True
+
+    assert entry.minor_version == 2
+    assert entry.title == expected
+    assert entry.data == mock_config_entry.data
+    assert entry.options == {"cost_meters": {}}
 
 
 @pytest.mark.parametrize(
@@ -316,9 +357,9 @@ async def test_remove_entry_keeps_statistics_while_another_login_remains(
     second_entry = MockConfigEntry(
         domain=DOMAIN,
         unique_id="other-user-id",
-        title="other@example.com",
+        title="ot•••@ex•••.com",
         version=2,
-        minor_version=1,
+        minor_version=2,
         data=dict(mock_config_entry.data),
     )
     second_entry.add_to_hass(hass)

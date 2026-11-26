@@ -9,6 +9,7 @@ from contextlib import contextmanager
 from typing import Any
 from unittest.mock import AsyncMock, Mock, patch
 
+import pytest
 from yarl import URL
 
 from homeassistant import config_entries
@@ -16,7 +17,10 @@ from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResultType
 
 # Importing the flow handler registers it in config_entries.HANDLERS["duke_energy"].
-from custom_components.duke_energy.config_flow import DukeEnergyOAuth2FlowHandler  # noqa: F401
+from custom_components.duke_energy.config_flow import (
+    DukeEnergyOAuth2FlowHandler,
+    mask_email,
+)
 from custom_components.duke_energy.const import (
     DOMAIN,
     MOBILE_REDIRECT_URI,
@@ -94,6 +98,44 @@ def _make_flow(
 
 
 # ---------------------------------------------------------------------------
+# Entry title masking
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("email", "expected"),
+    [
+        ("a@example.com", "•••@ex•••.com"),
+        # 2 to 8 characters look the same.
+        ("al@example.com", "al•••@ex•••.com"),
+        ("abc@example.com", "ab•••@ex•••.com"),
+        ("alex@example.com", "al•••@ex•••.com"),
+        ("alexande@example.com", "al•••@ex•••.com"),
+        ("alexander@example.com", "al•••er@ex•••.com"),
+        # Two plus-addresses of one mailbox stay distinguishable.
+        ("alex+power@example.com", "al•••er@ex•••.com"),
+        ("alex+home@example.com", "al•••me@ex•••.com"),
+        (" alex@example.com ", "al•••@ex•••.com"),
+        # A personal domain can identify its owner, so it is masked too.
+        ("alex@12345678.xyz", "al•••@12•••.xyz"),
+        ("alex@mail.example.co.uk", "al•••@ma•••.uk"),
+        ("alex@alexandersmith.com", "al•••@al•••.com"),
+        ("alex@gmail.com", "al•••@gm•••.com"),
+        ("alex@x.org", "al•••@x•••.org"),
+        ("alex@localhost", ""),
+        ("alex@.com", ""),
+        ("not-an-email", ""),
+        ("@example.com", ""),
+        ("alex@", ""),
+        ("", ""),
+    ],
+)
+def test_mask_email(email: str, expected: str) -> None:
+    """Local part and domain are masked; anything but an address gives nothing."""
+    assert mask_email(email) == expected
+
+
+# ---------------------------------------------------------------------------
 # Business-logic tests for async_oauth_create_entry
 # These call the method directly to test JWT parsing and abort conditions
 # without needing to drive the full OAuth redirect machinery.
@@ -109,9 +151,24 @@ async def test_oauth_create_entry(
     result = await flow.async_oauth_create_entry(_make_oauth_data())
 
     assert result["type"] is FlowResultType.CREATE_ENTRY
-    assert result["title"] == "test@example.com"
+    assert result["title"] == "te•••@ex•••.com"
     # Unique ID is internal_identifier, not email — drives deduplication logic.
     assert flow.unique_id == "test-user-id"
+
+
+@pytest.mark.parametrize("email", ["", "not-an-email"])
+async def test_oauth_create_entry_title_without_usable_email(
+    hass: HomeAssistant,
+    mock_setup_entry: AsyncMock,
+    email: str,
+) -> None:
+    """A claim that cannot be masked never reaches the title, nor does the user ID."""
+    id_token = _make_id_token({"email": email})
+
+    result = await _make_flow(hass).async_oauth_create_entry(_make_oauth_data(id_token))
+
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert result["title"] == "Duke Energy"
 
 
 async def test_oauth_create_entry_aborts_on_missing_id_token(
@@ -154,9 +211,9 @@ async def test_abort_if_already_configured(
     existing = MockConfigEntry(
         domain=DOMAIN,
         unique_id="test-user-id",
-        title="test@example.com",
+        title="te•••@ex•••.com",
         version=2,
-        minor_version=1,
+        minor_version=2,
         data=_make_oauth_data(),
     )
     existing.add_to_hass(hass)
@@ -195,9 +252,9 @@ async def test_reauth_success(
     existing = MockConfigEntry(
         domain=DOMAIN,
         unique_id="test-user-id",
-        title="test@example.com",
+        title="te•••@ex•••.com",
         version=2,
-        minor_version=1,
+        minor_version=2,
         data=_make_oauth_data(),
     )
     existing.add_to_hass(hass)
@@ -278,7 +335,7 @@ async def test_manual_paste_creates_entry(
         )
 
     assert result["type"] is FlowResultType.CREATE_ENTRY
-    assert result["title"] == "test@example.com"
+    assert result["title"] == "te•••@ex•••.com"
     # Same shape the OAuth callback view would have handed the flow.
     external_data = mock_resolve.call_args.args[0]
     assert external_data["code"] == "auth-code"
@@ -374,9 +431,9 @@ async def test_reauth_manual_paste(
     existing = MockConfigEntry(
         domain=DOMAIN,
         unique_id="test-user-id",
-        title="test@example.com",
+        title="te•••@ex•••.com",
         version=2,
-        minor_version=1,
+        minor_version=2,
         data=_make_oauth_data(),
     )
     existing.add_to_hass(hass)
@@ -438,9 +495,9 @@ def _entry_with_meters(hass: HomeAssistant, meters: dict) -> MockConfigEntry:
     entry = MockConfigEntry(
         domain=DOMAIN,
         unique_id="test-user-id",
-        title="test@example.com",
+        title="te•••@ex•••.com",
         version=2,
-        minor_version=1,
+        minor_version=2,
         data=_make_oauth_data(),
     )
     entry.add_to_hass(hass)
