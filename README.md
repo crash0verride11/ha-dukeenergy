@@ -5,20 +5,22 @@ A custom component to sync historical electricity usage for Duke Energy customer
 ## Crash0verride Edition
 This is a fork of [hunterjm](https://github.com/hunterjm/ha-dukeenergy)'s work with my own improvements, in order of addition: 
 - Gas meter readings
-- Average temperature readings — 1 per duke account, as meters at the same location have the same temperature reading.
+- Average temperature readings — 1 per Duke account, as meters at the same location have the same temperature reading.
 - Polling timing improvements — up to three semi-random polls over a narrower window, see FAQ
 - Cost statistics — configure a price and the integration calculates a running total, see configuration below
 - Account and meter entities:
-  - Account entities: When the integration last polled (`Last updated`), `Cost last bill cycle`, `Cost this time last year`
+  - Account entities: Update progress (`Status`), when the integration last polled (`Last updated`) and will next poll (`Next scheduled update`), `Cost last bill cycle`, `Cost this time last year`, `Bill balance`, `Bill due date`, `Bill status`
   - Meter entities: When each meter last received new data (`Last changed`), `Usage last bill cycle`, `Usage this bill cycle`,  `Usage this time last year`
-- Background first usage history retrieval
+- Authentication: both manual sign-in without an extension, and a new generic extension, HA OAuth Assist, for Chrome and Firefox
+- Background first usage history retrieval — devices appear right away and the `Status` entity tracks the download
+- Privacy — the entry title is a masked email and logs no longer show your email, address, or sign-in tokens
 
 ### AI Transparency
-Within the last year I've more heavily used AI to work on this integration. I'm a code-savvy, python-literate amateur who knows enough to spot when Claude is being a complete idiot, writing some convoluted insanity, or just making bad judgment calls. I review the code committed, excluding tests, where I only guide it to keep them practical instead of exhaustive. I try to add a human touch to the release notes for changes or features I considered, investigated, tested, captured traffic for, and spent time on. I let AI write some of the more tedious fix notes and backports from other forks, making sure appropriate credit is added. AI is not where I started, but I wouldn't have had the time to get past adding gas support without it.
+Within the last year I've more heavily used AI to work on this integration. I'm a code-savvy, Python-literate amateur who knows enough to spot when Claude is being a complete idiot, writing some convoluted insanity, or, typically, just making bad judgment calls. I review each line of the code committed and consistently find areas to improve, challenge, or completely re-think. I try to add a human touch to the release notes for changes or features I considered, investigated, tested, captured traffic for, and spent time on. I let AI write some of the more tedious fix notes and backports from other forks, making sure appropriate credit is added. AI is not where I started, but I wouldn't have had the time to get past adding gas support without it.
 
 ## Why?
 
-In November 2025, Duke Energy migrated their API authentication to use Auth0 which broke the existing core integration. In order to get around this, we needed to build a custom chrome extension that captured the OAuth callback from the mobile app flow to restore functionality. Because of the extensive and limited configuration options, it was decided that this integration would be better served as a custom integration than to try and put it back in core.
+In November 2025, Duke Energy migrated their API authentication to use Auth0 which broke the existing core integration. In order to get around this, we needed to build a custom Chrome extension that captured the OAuth callback from the mobile app flow to restore functionality. Because of the extensive and limited configuration options, it was decided that this integration would be better served as a custom integration than to try and put it back in core.
 
 ## Install
 > [!IMPORTANT]
@@ -28,7 +30,7 @@ In November 2025, Duke Energy migrated their API authentication to use Auth0 whi
 
 [![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=crash0verride11&repository=ha-dukeenergy&category=integration)
 
-### HA OAuth Assist (chrome and firefox extensions)
+### HA OAuth Assist (Chrome and Firefox extensions)
 
 This new extension is effectively the same as the original, but generic, designed for use across multiple authentication platforms. Future extension development will be focused on this one moving forward.
 
@@ -46,30 +48,28 @@ This new extension is effectively the same as the original, but generic, designe
 6. Start the authentication process in Home Assistant
 
 ### Legacy Chrome Extension
-Instructions are [available here](https://github.com/crash0verride11/ha-dukeenergy/blob/ha-dukeenergy-aio/resources/legacy-extension.md), though I will no longer be actively maintaining it.
+The previous Duke Energy-specific extension will continue to work for the time being and is available for [download here](https://github.com/crash0verride11/aiodukeenergy/releases/download/latest/chrome-extension.zip), however I will no longer be maintaining it.
 
 ### Safari Extension
->Safari support using the built-in xcode conversion method. Requires a free developer account. I intend to eventually publish a Safari Version of HA OAuth Assist to replace this integration specific extension.
+>Safari support requires a free developer account. I intend to eventually publish a Safari version of HA OAuth Assist to replace this integration-specific extension.
 
-1. Download the latest safari extension from the release page [here](https://github.com/crash0verride11/ha-dukeenergy/releases/latest/download/safari-extension.zip).
+1. Download the .zip of the [latest release](https://github.com/crash0verride11/aiodukeenergy/releases/latest) from aiodukeenergy-co, uncompress, and find the safari-extension folder.
 2. Open the project
 3. Set your free developer account as the Team in both Targets
 4. Build
-5. Enable the extension in Safari settings/
+5. Enable the extension in Safari settings.
 6. Build the extension again.
-7. Enable access to all or specific URL in the extension settings.
+7. Enable access to all or the specific URL in the extension settings.
 8. Try to authenticate.
 
 ### Manual Authentication
 > On non-iOS devices, manually configuring the browser's user agent is required.
 
-Manual sign-in is adapted from [sam2kb](https://github.com/sam2kb/ha-dukeenergy)'s fork, which built on [Jordan Dahmen](https://github.com/jdahmen)'s manual callback-URL flow ([hunterjm/ha-dukeenergy#57](https://github.com/hunterjm/ha-dukeenergy/pull/57)).
-
-1. Make Duke see a phone. Duke rejects desktop browsers after authentication:
+1. Make the integration identify as an iPhone. Duke rejects desktop browsers after authentication:
    - **Firefox:** `about:config` → add a **String** named
      `general.useragent.override` with the iPhone value below. Firefox has no
      per-site override, so reset the pref when you are done.
-   - **Safari:** enable the Develop menu, then
+   - **Safari Desktop:** enable the Develop menu, then
      **Develop → User Agent → Safari — iOS 18 — iPhone**.
    - **Chrome/Edge:** DevTools (`F12`) → device toolbar (`Ctrl+Shift+M`) →
      iPhone.
@@ -80,9 +80,7 @@ Manual sign-in is adapted from [sam2kb](https://github.com/sam2kb/ha-dukeenergy)
 5. If the page says `access_denied`, the browser still looked like a desktop;
    repeat from step 1 with a fresh sign-in link.
 
-Keep the setup form open until you submit the URL. Treat that URL as a sign-in
-credential and keep it out of issue reports and screenshots. Restore your usual
-User-Agent when you are done.
+Keep the setup form open until you submit the URL. Treat that URL as a sign-in credential and keep it out of issue reports and screenshots. You can reset your User-Agent when you are done.
 
 iPhone User-Agent:
 
@@ -97,13 +95,13 @@ Mozilla/5.0 (iPhone; CPU iPhone OS 18_6 like Mac OS X) AppleWebKit/605.1.15 (KHT
 | `access_denied` / "An error has occurred" instead of a code | Duke's login still saw a desktop browser | Apply the mobile User-Agent, then start a fresh sign-in |
 | "Not Found" page with `code` and `state` in the address | This is the expected landing page | Copy the whole address into **Callback URL** |
 | No `code` in the address | Sign-in did not complete | Reopen the current setup form's sign-in link with the mobile User-Agent applied |
-| "That URL belongs to a different sign-in attempt" | The pasted URL came from an older flow | Open the sign-in link from the current form again and paste the new address |
+| "That URL belongs to a different sign-in attempt" | The pasted URL came from a previous sign-in attempt | Open the sign-in link from the current form again and paste the new address |
 
 ## Configuration
 
 ### Per meter cost statistics
 
-For external statistics, such as those the integration makes, home assistant only allows adding a running total of costs to the energy dashboard. I've added a configuration window, available after setup, to select an entity tracking price or static price that the integration can use to calculate a running total cost statistic for you.
+For external statistics, such as those the integration makes, Home Assistant only allows adding a running total of costs to the Energy dashboard. I've added a configuration window, available after setup, to select an entity tracking price or static price that the integration can use to calculate a running total cost statistic for you.
 
 #### Setup
 
@@ -120,11 +118,11 @@ For external statistics, such as those the integration makes, home assistant onl
 
 ### I successfully added the integration, where is my data?
 
-The integration downloads three years of data from duke and home assistant needs time to calculate statistics based on your data. You can check the `Status` entity on any of your account devices to see if the integration is 'Fetching', 'Recording', or if data addition is 'Complete'.
+The integration downloads three years of data from Duke and Home Assistant needs time to calculate statistics based on your data. You can check the `Status` entity on any of your account devices to see if the integration is 'Fetching', 'Recording', or if data addition is 'Finished'.
 
 ### I don't see any usage or cost entities?
 
-Only external statistics are created with a name such as `duke_energy:gas_333333_energy_consumption`. Since we only know historical data, we are not able to set a known current state. While it is possible to create entities with permanent `unknown` states this does not allow cost calulcation (which is calculated from a current state) nor are they usable by additional dashboard card types.
+Only external statistics are created with a name such as `duke_energy:gas_333333_energy_consumption`. Since we only know historical data, we are not able to set a known current state. While it is possible to create entities with permanent `unknown` states this does not allow cost calculation (which is calculated from a current state) nor are they usable by additional dashboard card types.
 
 ### When is new data retrieved?
 
@@ -132,5 +130,5 @@ Only external statistics are created with a name such as `duke_energy:gas_333333
 * +/- a random interval up to 2 hours
   * The integration SHA-256 hashes "{entry_id}:{YYYY-MM-DD}", takes the first 8 hex chars as an integer, maps it into [-2hr, +2hr] in milliseconds, and stores it as a timedelta.
 * Stops polling after data retrieved successfully for all meters
-* consistent timing across restarts, different for every user, different every day
-* consistent offsets across intervals
+* Consistent timing across restarts, different for every user, different every day
+* Consistent offsets across intervals
